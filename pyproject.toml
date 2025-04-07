@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling", "hatch-requirements-txt"]
+build-backend = "hatchling.build"
+
+[project]
+name = "emotionlinmult"
+version = "0.1.0"
+description = "EmotionLinMulT: Transformer-based Emotion Recognition and Estimation."
+keywords = ["preprocess", "audio", "video", "text", "multimodal", "emotion", "intensity"]
+authors = [
+  { name = "fodorad", email = "foauaai@inf.elte.hu" },
+]
+readme = {"file" = "README.md", "content-type" = "text/markdown"}
+requires-python = ">=3.11"
+license = "MIT"
+dynamic = ["dependencies"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Documentation = "https://github.com/fodorad/emotionlinmult#readme"
+Issues = "https://github.com/fodorad/emotionlinmult/issues"
+Source = "https://github.com/fodorad/emotionlinmult"
+
+[tool.hatch.build.targets.wheel]
+packages = ["emotionlinmult"]
+exclude = ["emotionlinmult/test", "emotionlinmult/train", "data/"]
+
+[tool.hatch.build.targets.sdist]
+packages = ["emotionlinmult"]
+exclude = ["emotionlinmult/test", "emotionlinmult/train", "data/"]
+
+[tool.hatch.metadata.hooks.requirements_txt]
+files = ["requirements.txt"]
+
+[project.optional-dependencies]
+dev = [
+  "exordium",
+  "tqdm",
+  "matplotlib",
+  "seaborn"
+]

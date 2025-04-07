@@ -1,0 +1,10 @@
+base_save_dir: data/logs
+loss_fn: bce
+optimizer: adamw # "adam", "adamw", "radam", "sgd"
+learning_rate: 0.001
+weight_decay: 0.0005
+lr_scheduler: reducelronplateau # "cosine_warmup", "reducelronplateau", "warm_restart"
+max_epochs: 310
+patience: 30
+num_io_workers: 4
+seed: 42

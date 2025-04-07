@@ -1,0 +1,49 @@
+accelerator: gpu
+devices:
+  - 0
+float32_matmul_precision: medium # high, highest
+
+tasks:
+  emotion_class:
+    type: classification
+    num_classes: 8
+    loss_fn: cross_entropy
+    metrics:
+      - F1
+  emotion_intensity:
+    type: classification
+    num_classes: 2
+    loss_fn: cross_entropy
+    metrics:
+      - F1
+
+datasets:
+  ravdess:
+    tasks: 
+      - emotion_class
+      - emotion_intensity
+
+n_epochs: 100
+shake: false
+
+optimizer:
+  name: adam
+  base_lr: 0.001
+
+lr_scheduler:
+  name: CosineAnnealingLR
+  T_max: 100 # n_epochs
+
+checkpoints:
+  - name: checkpoint_valid_loss
+    monitor: valid_loss
+    mode: min
+  - name: checkpoint_valid_emotion_class_F1
+    monitor: valid_emotion_class_F1
+    mode: max
+    test: true
+  - name: checkpoint_valid_emotion_intensity_F1
+    monitor: valid_emotion_intensity_F1
+    mode: max
+
+output_dir: results/unimodal/ravdess_mt_opengraphau

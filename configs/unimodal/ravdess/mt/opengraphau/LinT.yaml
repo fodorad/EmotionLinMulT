@@ -1,0 +1,36 @@
+model_name: LinT
+
+# input-output params
+input_feature_dim: 41
+
+output_dim:
+  - 8 # emotion class
+  - 2 # emotion intensity
+
+# input handlers
+special_handling:
+  wavlm_baseplus:
+    type: weighted_sum
+    start_layer: 6
+    end_layer: 12
+
+# CM and SA transformer params
+d_model: 40
+n_heads: 8
+n_layers: 6
+attention_type: linear # linear, bigbird, softmax, mha
+
+## bigbird attention params - ignored otherwise
+#block_size: 64
+#num_global_tokens: 16
+#num_random_tokens: 10
+#dropout_attention: 0.
+
+dropout_embedding: 0
+dropout_relu: 0.1
+dropout_residual: 0.1
+dropout_output: 0.1
+
+# architecture params
+time_dim_reducer: attentionpool
+ffn_fusion: True

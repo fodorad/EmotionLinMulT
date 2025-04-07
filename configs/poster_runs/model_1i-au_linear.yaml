@@ -1,0 +1,16 @@
+model_type: lint
+input_modality_channels: 41
+output_dim:
+  - 8
+  - 3
+d_model: 40
+n_heads: 6
+n_layers: 4
+dropout_embedding: 0.
+dropout_ca: 0.1
+dropout_sa: 0.1
+dropout_relu: 0.1
+dropout_residual: 0.1
+dropout_output: 0
+time_reduce_type: attentionpool
+attention_type: linear

@@ -1,0 +1,10 @@
+base_save_dir: data/logs
+loss_fn: ce
+optimizer: sgd # "adam", "adamw", "radam", "sgd"
+learning_rate: 0.001
+weight_decay: 0.00001
+lr_scheduler: warm_restart # "cosine_warmup", "reducelronplateau", "warm_restart"
+max_epochs: 20
+patience: 10
+num_io_workers: 4
+seed: 42

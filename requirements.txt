@@ -1,0 +1,16 @@
+toml
+Pillow
+opencv-python
+opencv-contrib-python
+scipy
+torch==2.5.1
+torchaudio==2.5.1
+decord
+pydub
+tqdm
+matplotlib
+linmult
+pyyaml
+prettytable
+lightning
+seaborn
