@@ -1,71 +1,226 @@
+from pathlib import Path
 import numpy as np
+import pandas as pd
 import torch
+from scipy.stats import pearsonr
 from sklearn.metrics import (
     accuracy_score, confusion_matrix, precision_score,
-    recall_score, f1_score, average_precision_score, mean_absolute_error
+    recall_score, f1_score, mean_absolute_error
 )
-from scipy.stats import pearsonr
-# from torchmetrics import Accuracy, Precision, Recall, F1Score
-
-format = lambda x: np.round(x, decimals=3)
 
 
-def classification_metrics(
-        y_true: torch.Tensor,
-        y_pred: torch.Tensor,
-        y_mask: torch.Tensor,
-        n_classes: int
-    ):
-    """Calculates classification metrics
+def format(x: float) -> float:
+    """Format a float value to 3 decimal places."""
+    return float(np.round(x, decimals=3))
 
-    Note:
-        y_true and y_score are the class indices.
-        values are between 0 and C-1
-        y_true expected shape is (N,)
-        y_score expected shape is (N,)
-        y_pred expected shape is (N, C)
-        expected type is int
+
+def to_numpy(tensor_or_array) -> np.ndarray:
+    """Convert a PyTorch tensor or NumPy array to NumPy array.
+    
+    Args:
+        tensor_or_array: Input tensor or array
+        
+    Returns:
+        np.ndarray: NumPy array
     """
-    # Apply mask
-    y_pred = y_pred[y_mask.bool()] # Shape (valid_N, n_classes)
-    y_true = y_true[y_mask.bool()] # Shape (valid_N,)
+    if isinstance(tensor_or_array, torch.Tensor):
+        return tensor_or_array.detach().cpu().numpy()
+    return np.array(tensor_or_array)
 
-    # Get predicted class labels
-    y_score = torch.argmax(y_pred, dim=1)  # Shape (valid_N,)
 
-    # Convert tensors to numpy arrays if necessary
-    if isinstance(y_true, torch.Tensor):
-        y_true = y_true.detach().cpu().squeeze().numpy()
+def calculate_sentiment(
+        preds: np.ndarray | torch.Tensor,
+        targets: np.ndarray | torch.Tensor,
+        output_path: str | Path = None
+    ) -> dict:
+    """Calculate sentiment metrics for regression task.
+    
+    Args:
+        preds: Predicted sentiment values, shape (N,)
+        targets: Target sentiment values, shape (N,)
+        output_path: Optional path to save metrics as CSV
+        
+    Returns:
+        dict: Dictionary containing the following metrics:
+            - acc_7: 7-class accuracy (-3 to 3)
+            - acc_2: Binary accuracy (positive/negative)
+            - f1_7: 7-class weighted F1 score
+            - f1_2: Binary weighted F1 score
+            - mae: Mean absolute error
+            - corr: Pearson correlation
+    """
+    preds = to_numpy(preds)
+    targets = to_numpy(targets)
 
-    if isinstance(y_score, torch.Tensor):
-        y_score = y_score.detach().cpu().squeeze().numpy()
+    preds = np.squeeze(preds, axis=-1) # (N, 1) -> (N,)
+    preds = np.clip(preds, a_min=-3, a_max=3)
+    return sentiment_metrics(preds, targets, output_path)
 
-    if y_true.ndim != 1:
-        raise ValueError(f"Unexpected y_true shape. Expected is (N,) got instead {y_true.shape}")
 
-    if y_score.ndim != 1:
-        raise ValueError(f"Unexpected y_score shape. Expected is (N,) got instead {y_score.shape}")
+def sentiment_metrics(
+        preds: np.ndarray,
+        targets: np.ndarray,
+        output_path: str | Path = None
+    ) -> dict:
+    """Calculate sentiment metrics for regression task.
+    
+    Args:
+        preds: Predicted sentiment values, shape (N,)
+        targets: Target sentiment values, shape (N,)
+        output_path: Optional path to save metrics as CSV
+        
+    Returns:
+        dict: Dictionary containing the following metrics:
+            - acc_7: 7-class accuracy (-3 to 3)
+            - acc_2: Binary accuracy (positive/negative)
+            - f1_7: 7-class weighted F1 score
+            - f1_2: Binary weighted F1 score
+            - mae: Mean absolute error
+            - corr: Pearson correlation
+    """
+    assert preds.ndim == 1 and preds.shape == targets.shape, \
+        f"Expected preds and targets to be 1D arrays of the same shape, got {preds.shape} and {targets.shape}"
 
-    # Ensure correct type and shape
-    y_true = y_true.astype(int)
-    y_score = y_score.astype(int)
+    # 7-class metrics (-3 to 3)
+    preds_7_class = np.round(preds).astype(int)
+    targets_7_class = np.round(targets).astype(int)
+    ACC_7 = format(accuracy_score(targets_7_class, preds_7_class))
+    F1_7 = format(f1_score(targets_7_class, preds_7_class, average='weighted'))
 
-    # Metrics for multiclass classification
-    metrics = {}
-    metrics["ACC"] = format(accuracy_score(y_true, y_score))
-    metrics["ConfusionMatrix"] = list(confusion_matrix(y_true, y_score, labels=np.arange(n_classes)).ravel())
-    metrics["NormalizedConfusionMatrix"] = list(confusion_matrix(y_true, y_score, normalize="true", labels=np.arange(n_classes)).ravel())
-    metrics["Support"] = list(np.bincount(y_true, minlength=n_classes))
+    # Binary metrics (positive/negative) 
+    preds_binary = (preds > 0).astype(int)
+    targets_binary = (targets > 0).astype(int)
+    ACC_2 = format(accuracy_score(targets_binary, preds_binary))
+    F1_2 = format(f1_score(targets_binary, preds_binary, average='weighted'))
 
-    # Precision, Recall, F1 for each class
-    # micro: Sum statistics over all labels
-    # macro: Calculate statistics for each label and average them
-    # weighted: calculates statistics for each label and computes weighted average using their support
-    metrics["P"] = format(precision_score(y_true, y_score, average="weighted", zero_division=0))
-    metrics["R"] = format(recall_score(y_true, y_score, average="weighted", zero_division=0))
-    metrics["F1"] = format(f1_score(y_true, y_score, average="weighted", zero_division=0))
+    # Regression metrics
+    MAE = format(mean_absolute_error(targets, preds))
+    CORR, _ = pearsonr(preds, targets)
+    CORR = format(CORR)
+
+    # Compile metrics
+    metrics = {
+        'ACC_7': ACC_7,
+        'ACC_2': ACC_2,
+        'F1_7': F1_7,
+        'F1_2': F1_2,
+        'MAE': MAE,
+        'CORR': CORR
+    }
+
+    # Save to CSV if path provided
+    if output_path is not None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame({name: [value] for name, value in metrics.items()})
+        df.to_csv(str(output_path), index=False)
+        print(f'Metrics saved to {output_path}')
+    
     return metrics
 
+
+def calculate_sentiment_class(
+        logits: np.ndarray | torch.Tensor,  # Shape: (N, 3)
+        targets: np.ndarray | torch.Tensor,  # Shape: (N,)
+        output_path: str | Path = None
+    ) -> dict:
+    """Calculate metrics for sentiment classification task.
+    
+    Args:
+        logits: Model logits/predictions, shape (N, 3) for 3 classes (neutral, positive, negative)
+        targets: Target class indices, shape (N,)
+        output_path: Optional path to save metrics as CSV
+        
+    Returns:
+        dict: Classification metrics dictionary
+    """
+    # Convert all inputs to numpy
+    logits = to_numpy(logits)    # Shape: (N, C)
+    targets = to_numpy(targets)  # Shape: (N,)
+
+    # Get predicted class indices
+    preds = np.argmax(logits, axis=1)  # Shape: (N,)
+
+    return classification_metrics(preds, targets, n_classes=3)
+
+
+def calculate_emotion_class(
+        logits: np.ndarray | torch.Tensor,  # Shape: (N, 7)
+        targets: np.ndarray | torch.Tensor,  # Shape: (N,)
+        output_path: str | Path = None
+    ) -> dict:
+    """Calculate metrics for emotion classification task.
+    
+    Args:
+        logits: Model logits/predictions, shape (N, C) for C emotion classes
+        targets: Target class indices, shape (N,) with values in [0, C-1]
+        output_path: Optional path to save metrics as CSV
+        
+    Returns:
+        dict: Classification metrics dictionary
+    """
+    # Convert all inputs to numpy
+    logits = to_numpy(logits)    # Shape: (N, C)
+    targets = to_numpy(targets)  # Shape: (N,)
+
+    # Get predicted class indices
+    preds = np.argmax(logits, axis=1)  # Shape: (N,)
+
+    return classification_metrics(preds, targets, n_classes=7)
+
+def classification_metrics(
+        preds: np.ndarray,   # Shape: (N,)
+        targets: np.ndarray,  # Shape: (N,)
+        n_classes: int
+    ) -> dict:
+    """Calculate classification metrics.
+    
+    Args:
+        preds: Model predictions as class indices, shape (N,) with values in [0, C-1]
+        targets: Target class indices, shape (N,) with values in [0, C-1]
+        n_classes: Number of classes C
+
+    Returns:
+        dict: Dictionary containing the following metrics:
+            - ACC: Accuracy score
+            - ConfusionMatrix: Flattened confusion matrix
+            - NormalizedConfusionMatrix: Flattened normalized confusion matrix
+            - Support: Class support counts
+            - P: Weighted precision
+            - R: Weighted recall
+            - F1: Weighted F1 score
+    """
+    # Ensure correct shapes
+    assert targets.ndim == 1 and targets.shape == preds.shape, \
+        f"Expected targets and preds to be 1D arrays of the same shape, got {targets.shape} and {preds.shape}"
+
+    # Convert to int type
+    targets = targets.astype(int)
+    preds = preds.astype(int)
+
+    # Calculate metrics
+    metrics = {}
+    metrics["ACC"] = format(accuracy_score(targets, preds))
+
+    # Confusion matrices
+    cm = confusion_matrix(targets, preds, labels=np.arange(n_classes))
+    metrics["ConfusionMatrix"] = list(cm.ravel())
+
+    ncm = confusion_matrix(targets, preds, normalize="true", labels=np.arange(n_classes))
+    metrics["NormalizedConfusionMatrix"] = list(ncm.ravel())
+
+    # Class support
+    metrics["Support"] = list(np.bincount(targets, minlength=n_classes))
+
+    # Weighted metrics
+    metrics["P"] = format(precision_score(targets, preds, average="weighted", zero_division=0))
+    metrics["R"] = format(recall_score(targets, preds, average="weighted", zero_division=0))
+    metrics["F1"] = format(f1_score(targets, preds, average="weighted", zero_division=0))
+
+    return metrics
+
+
+
+'''
 
 def _classification_metrics(predictions, targets, mask, n_classes):
     """
@@ -326,7 +481,7 @@ def CCC(ground_truth, predictions, mask=None):
     )
     return ccc
 
-'''
+
 def calculate_sentiment_metrics(preds_np, targets_np):
     # 7-class metrics
     # Round predictions to the nearest integer for classification into 7 classes (-3 to 3)

@@ -1,50 +1,9 @@
 import torch
-import numpy as np
-
-
-def get_scheduler(optimizer, config: dict):
-    lr_scheduler_config = config.get('lr_scheduler', {})
-    optimizer_config = config.get('optimizer', {})
-    base_lr = optimizer_config.get('base_lr', 1e-3)
-    name = lr_scheduler_config.get('name', 'reducelronplateau')
-
-    if name in ['cosine_warmup', 'warmup']:
-
-        total_steps = int(config.get('total_steps',
-            config.get('n_epochs') * config.get('train_size') / config.get('batch_size')))
-        warmup_steps = int(total_steps * lr_scheduler_config.get('warmup_steps', 0.05))
-
-        if name == 'cosine_warmup':
-            scheduler = CosineAnnealingWarmupScheduler(
-                optimizer=optimizer,
-                warmup_steps=warmup_steps,
-                max_lr=base_lr,
-                total_steps=total_steps
-            )
-        else:
-            scheduler = WarmupScheduler(
-                optimizer=optimizer,
-                warmup_steps=warmup_steps,
-                base_lr=base_lr
-            )
-
-    else:
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode='min',
-            factor=lr_scheduler_config.get('factor', 0.1),
-            patience=lr_scheduler_config.get('patience', 5),
-            min_lr=1e-6
-        )
-
-    return scheduler
 
 
 class WarmupScheduler:
-
     def __init__(self, optimizer, warmup_steps, base_lr):
-        """
-        Warmup scheduler to increase learning rate linearly during warmup.
+        """Warmup scheduler to increase learning rate linearly during warmup.
         
         Args:
             optimizer: The optimizer being used.
@@ -78,10 +37,8 @@ class WarmupScheduler:
 
 
 class CosineAnnealingWarmupScheduler:
-
     def __init__(self, optimizer, warmup_steps, max_lr, total_steps):
-        """
-        Scheduler that combines warmup with cosine annealing.
+        """Scheduler that combines warmup with cosine annealing.
         
         Args:
             optimizer: The optimizer being used.
@@ -120,21 +77,3 @@ class CosineAnnealingWarmupScheduler:
 
     def get_last_lr(self):
         return [param_group['lr'] for param_group in self.optimizer.param_groups]
-
-
-class CosineWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
-
-    def __init__(self, optimizer, warmup, max_iters):
-        self.warmup = warmup
-        self.max_num_iters = max_iters
-        super().__init__(optimizer)
-
-    def get_lr(self):
-        lr_factor = self.get_lr_factor(epoch=self.last_epoch)
-        return [base_lr * lr_factor for base_lr in self.base_lrs]
-
-    def get_lr_factor(self, epoch):
-        lr_factor = 0.5 * (1 + np.cos(np.pi * epoch / self.max_num_iters))
-        if epoch <= self.warmup:
-            lr_factor *= epoch * 1.0 / self.warmup
-        return lr_factor

@@ -10,51 +10,42 @@ import seaborn as sns
 
 class History:
 
-    def __init__(self):
+    def __init__(self, log_dir: str | Path):
         self.history = {}
+        self.log_dir = Path(log_dir)
+        self.plot_dir = self.log_dir / 'visualization'
 
 
-    def save(self, output_dir: str | Path):
-        """Save the history to a JSON file."""
-        output_path = Path(output_dir) / "history.json"
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        def convert_to_serializable(obj):
-            if isinstance(obj, np.ndarray):
-                return obj.tolist()  # Convert numpy arrays to lists
-            if isinstance(obj, (np.int64, np.int32, np.float64, np.float32)):
-                return obj.item()  # Convert numpy scalars to Python scalars
-            return obj  # Default case
-
+    def save(self):
+        output_path = Path(self.log_dir) / "history.json"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
-            json.dump(self.history, f, indent=4, default=convert_to_serializable)
+            json.dump(self.history, f, indent=4, default=self._convert_to_serializable)
         print(f"\nHistory saved to {output_path}")
 
 
-    def save_test(self, output_dir: str | Path):
-        """Save the test results to a JSON file."""
-        output_path = Path(output_dir) / "history_test.json"
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        def convert_to_serializable(obj):
-            if isinstance(obj, np.ndarray):
-                return obj.tolist()  # Convert numpy arrays to lists
-            if isinstance(obj, (np.int64, np.int32, np.float64, np.float32)):
-                return obj.item()  # Convert numpy scalars to Python scalars
-            return obj  # Default case
-
+    def save_test(self):
+        output_path = Path(self.log_dir) / "history_test.json"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         history_test = {'test': self.history['test']}
-        
         with open(output_path, "w") as f:
-            json.dump(self.history, f, indent=4, default=convert_to_serializable)
+            json.dump(history_test, f, indent=4, default=self._convert_to_serializable)
         print(f"\nHistory saved to {output_path}")
+
+
+    def _convert_to_serializable(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist() # Convert numpy arrays to lists
+        if isinstance(obj, (np.int64, np.int32, np.float64, np.float32)):
+            return obj.item() # Convert numpy scalars to Python scalars
+        return obj
 
 
     def load(self, output_path: str):
-        """Load the history from a JSON file."""
         with open(output_path, "r") as f:
             self.history = json.load(f)
         print(f"\nHistory loaded from {output_path}")
+        return self
 
 
     def update(self, phase, task, metric, value, epoch):
@@ -64,8 +55,6 @@ class History:
             self.history[phase][task] = {}
         if metric not in self.history[phase][task]:
             self.history[phase][task][metric] = []
-
-        # Store the value and the epoch
         self.history[phase][task][metric].append((epoch, value))
 
 
@@ -73,45 +62,93 @@ class History:
         return self.history.get(phase, {}).get(task, {}).get(metric, [])
 
 
-    def plot(self, task, metric, output_file: str):
+    def get_best_epoch(self, phase: str, task: str, metric: str, mode: str = 'max'):
+        """
+        Get the epoch where the given metric is the best (lowest or highest).
+        
+        :param phase: Phase of training (e.g., 'train', 'valid').
+        :param task: Task name.
+        :param metric: Metric name.
+        :param mode: If 'max', find the epoch where the metric is highest. If 'min', find lowest.
+        :return: Best epoch and its corresponding value.
+        """
+        if mode not in {'max', 'min'}: raise ValueError('Argument mode should be in \{"max", "min"\}')
 
-        data = self.get_metric("valid", "all", "avg_loss")
-        epochs, values = zip(*data) if data else ([], [])
-        best_loss_epoch = epochs[int(torch.argmin(torch.tensor(values)))]
+        data = self.get_metric(phase, task, metric)
+        if not data:
+            return None, None
+        
+        epochs, values = zip(*data)
+        
+        if mode == 'max':
+            best_idx = int(torch.argmax(torch.tensor(values)))
+        else:
+            best_idx = int(torch.argmin(torch.tensor(values)))
+        
+        return epochs[best_idx], values[best_idx]
 
+
+    def plot(self, task: str,
+                   metric: str,
+                   best_epoch_metric: str = None):
+        """
+        Plot a given metric for both training and validation phases, and optionally mark
+        the best epoch of another metric.
+
+        :param task: Task name.
+        :param metric: Metric to plot.
+        :param best_epoch_metric: Metric used to determine the best epoch.
+                                  If provided, its best epoch will be marked on the plot.
+                                  If `best_epoch_metric` is None or not found in history,
+                                  only the current metric will be plotted.
+        """
+
+        # Determine whether to maximize or minimize based on the metric name
+        mode = 'max' if any([elem.lower() in metric.lower() for elem in ['f1', 'corr', 'acc']]) else 'min'
+
+        # Plot training and validation metrics
         for phase in ["train", "valid"]:
-            data = self.get_metric(phase, task, metric)
-            epochs, values = zip(*data) if data else ([], [])
-            plt.plot(epochs, values, "*-", label=f"{phase} {metric}")
+            data = self.get_metric(phase=phase, task=task, metric=metric)
+            if data:
+                epochs, values = zip(*data)
+                plt.plot(epochs, values, "*-", label=f"{phase} {metric}")
 
-        data = self.get_metric("valid", task, metric)
-        epochs, values = zip(*data) if data else ([], [])
-        
-        plt.plot(best_loss_epoch, values[best_loss_epoch], 'ro', markersize=5, label=f'{best_loss_epoch}: {np.round(values[best_loss_epoch], decimals=3)}')
-        
-        if metric in ['F1', 'ACC', 'P', 'R']:
-            best_metric_epoch = epochs[int(torch.argmax(torch.tensor(values)))]
-            plt.plot(best_metric_epoch, values[best_metric_epoch], 'go', markersize=5, label=f'{best_metric_epoch}: {np.round(values[best_metric_epoch], decimals=3)}')
+                # Mark the best epoch for this metric in each phase
+                best_metric_epoch, best_metric_value = self.get_best_epoch(
+                    phase=phase, task=task, metric=metric, mode=mode
+                )
+                if best_metric_epoch is not None and phase == 'valid':
+                    plt.plot(best_metric_epoch, best_metric_value, 'go', markersize=8,
+                             label=f"Best {metric} ({phase}, Epoch {best_metric_epoch})")
 
-        plt.title(f"Metrics for {task}")
+        # Mark the best epoch for another selected metric (if provided)
+        if best_epoch_metric:
+            mode = 'max' if any([elem.lower() in best_epoch_metric.lower() for elem in ['f1', 'corr', 'acc']]) else 'min'
+            for phase in ["train", "valid"]:
+                data = self.get_metric(phase=phase, task=task, metric=metric)
+                if data:
+                    epochs, values = zip(*data)
+                    best_other_epoch, _ = self.get_best_epoch(
+                        phase=phase, task=task, metric=best_epoch_metric, mode=mode
+                    )
+                    if best_other_epoch is not None and phase == 'valid':
+                        plt.plot(best_other_epoch, values[epochs.index(best_other_epoch)], 'b*', markersize=10,
+                                 label=f"Best {best_epoch_metric} ({phase}, Epoch {best_other_epoch})")
+
+        plt.title(f"{metric} over Epochs for {task}")
         plt.xlabel("Epoch")
-        plt.xticks(range(len(epochs)), [str(epoch) if epoch % 5 == 0 else "" for epoch in range(len(epochs))])
-
-        if metric in ['F1', 'ACC', 'P', 'R']:
-            plt.ylim([0, 1])
-            plt.yticks(np.arange(0, 1.1, 0.1))
         plt.ylabel(metric)
-        plt.legend(loc="upper left")
-
+        plt.legend(loc="best")
         plt.grid(True)
         plt.tight_layout()
 
-        Path(output_file).parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(str(output_file))
+        output_file = self.plot_dir / f'plot_{metric}.png'
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_file)
         plt.close()
 
 
-    def plot_ncm(self, phase, task, metric, output_dir, n_classes: int):
+    def plot_ncm(self, phase, task, metric, n_classes: int):
         """Plot the Normalized Confusion Matrix (NCM)"""
         # Extract confusion matrices for the given phase and metric
         confusion_matrices = [epoch_ncm_tuple[1] for epoch_ncm_tuple in self.history[phase][task]["NormalizedConfusionMatrix"]]
@@ -151,30 +188,12 @@ class History:
             xticklabels=[f"Class {i}" for i in range(n_classes)],
             yticklabels=[f"Class {i}" for i in range(n_classes)]
         )
-        
-        # Add labels and title
+
         plt.xlabel("Predicted Labels", fontsize=14)
         plt.ylabel("True Labels", fontsize=14)
         plt.title(f"Normalized Confusion Matrix ({phase.capitalize()}, {task}, {metric})", fontsize=16)
 
-        # Save the plot
-        output_path = output_dir / f'{phase}_{task}_{metric}_ncm.png'
+        output_path = self.plot_dir / f'{phase}_{task}_{metric}_ncm.png'
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(output_path)
         plt.close()
-
-
-
-    '''
-    def plot_cm(data, output_path, n_classes: int,  metric: str = "F1"):
-        valid = [d[metric] for d in data["valid"]]
-        best_valid_index = valid.index(np.nanmax(valid))
-        best_valid_confusion_matrix = data["valid"][best_valid_index]["ConfusionMatrix"].reshape(n_classes, n_classes)
-        sns.heatmap(best_valid_confusion_matrix, annot=True, linewidths=2)
-        plt.xlabel("Predictions", fontsize=18)
-        plt.ylabel("Actuals", fontsize=18)
-        plt.title("Confusion Matrix", fontsize=18)
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(output_path)
-        plt.close()
-    '''

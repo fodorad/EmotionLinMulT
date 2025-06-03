@@ -41,5 +41,6 @@ dev = [
   "exordium",
   "tqdm",
   "matplotlib",
-  "seaborn"
+  "seaborn",
+  "webdataset",
 ]

@@ -1,0 +1,24 @@
+seed: 42
+
+feature_list:
+  - wavlm_baseplus # (T_a, 768) WavLM Base+
+  - clip # (T_v, 1024) CLIP
+  - xlm_roberta # (T_t, 768) XLM-RoBERTa
+
+target_list:
+  - sentiment # [-3, +3]
+  - sentiment_class # {neutral, negative, positive}
+
+datasets:
+  train:
+    - meld
+    - mosei
+  valid:
+    - meld
+    - mosei
+  test:
+    - meld
+    - mosei
+
+batch_size: 32
+num_workers: 8
