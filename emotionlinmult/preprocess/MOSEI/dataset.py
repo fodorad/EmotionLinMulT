@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 from tqdm import tqdm
 import pprint
-import numpy as np
 import torch
 import webdataset as wds
 from emotionlinmult.preprocess.MOSEI import DB_PROCESSED
@@ -98,11 +97,11 @@ def calculate_sentiment_distribtuion():
 if __name__ == "__main__":
 
     count_samples()
-    calculate_sentiment_distribtuion()
-    exit()
+    #calculate_sentiment_distribtuion()
+    #exit()
 
-    test_dataset = create_dataset("test")
-    for i, sample in tqdm(enumerate(test_dataset), desc="Loading test samples"):
-        print(f"[test] {i}")
-        print(sample.keys())
-        if i == 10: break
+    ds = create_dataset("train")
+    for i, sample in tqdm(enumerate(ds), desc="Loading train samples"):
+        print(f"[train] sample {i}")
+        #print(sample.keys())
+        #if i == 10: break

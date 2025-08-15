@@ -1,21 +1,22 @@
-import os
 import argparse
 import json
 import numpy as np
+from tqdm import tqdm
 from pprint import pprint
-import pandas as pd
 import torch
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Union, Any
-import matplotlib.pyplot as plt
 from prettytable import PrettyTable
-import csv
 from emotionlinmult.train.metrics import classification_metrics, to_numpy
 
-from emotionlinmult.preprocess.MEAD.dataset import UNIFIED_EMOTION_CLASS_NAMES, UNIFIED_EMOTION_INTENSITY_NAMES
+from emotionlinmult.preprocess import (
+    MEAD_EMOTION_MAPPING,
+    MEAD_EMOTION_ORIG2NAME,
+    MEAD_INTENSITY_MAPPING,
+    MEAD_INTENSITY_ORIG2NAME,
+    MEAD_CAMERA_ID2ORIG,
+)
 from emotionlinmult.preprocess.MEAD.dataset import create_dataset as create_mead_dataset
-from emotionlinmult.preprocess.MEAD.create_webdataset import CAMERA_POSITIONS
-from emotionlinmult.test.results import DATASET_CONFIG
+
 from emotionlinmult.train.datamodule import MultiDatasetModule
 from linmult import LinMulT, LinT, load_config
 
@@ -23,7 +24,7 @@ from linmult import LinMulT, LinT, load_config
 def get_dataloader(
         camera_id: int | None = None,
         drop_feature_list: list[str] | None = None,
-        mode: str = 'avt',
+        mode: str = 'av',
     ):
 
     if mode == 'avt':
@@ -42,12 +43,13 @@ def get_dataloader(
             'test': ['mead']
         },
         'camera_id': camera_id,
-        'drop_feature_list': drop_feature_list
+        'drop_feature_list': drop_feature_list,
+        'num_workers': 0,
     }
 
     test_dataset = create_mead_dataset("test", camera_id=camera_id, drop_feature_list=drop_feature_list)
     datamodule = MultiDatasetModule(config)
-    test_dataloader = datamodule.wrap_dataset(dataset=test_dataset, subset="test", shuffle=False)
+    test_dataloader = datamodule.wrap_dataset(dataset=test_dataset, subset="test")
 
     print('\nDataloader is created with config:')
     pprint(config)
@@ -55,7 +57,7 @@ def get_dataloader(
     return test_dataloader
 
 
-def get_model(checkpoint_path: str, config_path: str):
+def get_model(checkpoint_path: str, config_path: str, device: str = 'mps'):
     config = load_config(config_path)
 
     if config['model_name'] == 'LinT':
@@ -65,11 +67,11 @@ def get_model(checkpoint_path: str, config_path: str):
     else:
         raise ValueError(f'Unsupported model name {config["model_name"]}')
 
-    checkpoint = torch.load(checkpoint_path, weights_only=True, map_location=torch.device(f'cuda:{config.get("devices", [0])[0]}'))
+    checkpoint = torch.load(checkpoint_path, weights_only=True, map_location=torch.device('cpu'))
     state_dict = {k.replace('model.', ''): v for k, v in checkpoint['state_dict'].items() if 'awl' not in k}
     model.load_state_dict(state_dict)
 
-    model.to('cuda:0')
+    model.to(device)
     model.eval()
 
     print('\nModel is loaded with config:')
@@ -116,9 +118,9 @@ def create_results_table_camera(results: dict) -> PrettyTable:
             support = metrics['Support']
 
             table.add_row([
-                'all' if camera_id == 'all' else CAMERA_POSITIONS[camera_id],
+                'all' if camera_id == 'all' else MEAD_CAMERA_ID2ORIG[camera_id],
                 'emotion_class',
-                'all' if intensity == 'all' else f'{UNIFIED_EMOTION_INTENSITY_NAMES[intensity]}',
+                'all' if intensity == 'all' else f'{MEAD_INTENSITY_ORIG2NAME[MEAD_INTENSITY_MAPPING.to_orig_id(intensity)]}',
                 support,
                 f"{float(metrics['F1']):.2f}",
                 f"{float(metrics['ACC']):.2f}"
@@ -129,9 +131,9 @@ def create_results_table_camera(results: dict) -> PrettyTable:
             support = metrics['Support']
             
             table.add_row([
-                'all' if camera_id == 'all' else CAMERA_POSITIONS[camera_id],
+                'all' if camera_id == 'all' else MEAD_CAMERA_ID2ORIG[camera_id],
                 'emotion_intensity',
-                'all' if emotion_class == 'all' else f'{UNIFIED_EMOTION_CLASS_NAMES[emotion_class]}',
+                'all' if emotion_class == 'all' else f'{MEAD_EMOTION_ORIG2NAME[MEAD_EMOTION_MAPPING.to_orig_id(emotion_class)]}',
                 support,
                 f"{float(metrics['F1']):.2f}",
                 f"{float(metrics['ACC']):.2f}"
@@ -171,7 +173,7 @@ def create_results_table_modality_dropout(results: dict) -> PrettyTable:
             table.add_row([
                 modality,
                 'emotion_class',
-                'all' if intensity == 'all' else f'{UNIFIED_EMOTION_INTENSITY_NAMES[intensity]}',
+                'all' if intensity == 'all' else f'{MEAD_INTENSITY_ORIG2NAME[MEAD_INTENSITY_MAPPING.to_orig_id(intensity)]}',
                 support,
                 f"{float(metrics['F1']):.2f}",
                 f"{float(metrics['ACC']):.2f}"
@@ -184,7 +186,7 @@ def create_results_table_modality_dropout(results: dict) -> PrettyTable:
             table.add_row([
                 modality,
                 'emotion_intensity',
-                'all' if emotion_class == 'all' else f'{UNIFIED_EMOTION_CLASS_NAMES[emotion_class]}',
+                'all' if emotion_class == 'all' else f'{MEAD_EMOTION_ORIG2NAME[MEAD_EMOTION_MAPPING.to_orig_id(emotion_class)]}',
                 support,
                 f"{float(metrics['F1']):.2f}",
                 f"{float(metrics['ACC']):.2f}"
@@ -200,9 +202,9 @@ def create_results_table_modality_dropout(results: dict) -> PrettyTable:
     return table
 
 
-def table_headpose(model):
+def table_headpose(model, device: str = 'mps'):
     
-    feature_list = ['wavlm_baseplus', 'clip', 'xml_roberta']
+    feature_list = ['wavlm_baseplus', 'clip']
     target_list = ['emotion_class', 'emotion_intensity']
 
     results = {}
@@ -215,13 +217,13 @@ def table_headpose(model):
         y_score_emotion_intensity = []
         y_true_emotion_intensity = []
 
-        for batch_ind, batch in enumerate(test_dataloader):
-            x = [batch[feature_name].to('cuda:0') for feature_name in feature_list]
-            x_masks = [batch[f'{feature_name}_mask'].to('cuda:0') for feature_name in feature_list]
-            y_true = [batch[task].to('cuda:0') for task in target_list]
-            y_true_masks = [batch[f'{task}_mask'].to('cuda:0') for task in target_list]
+        for batch_ind, batch in enumerate(tqdm(test_dataloader, desc=f"Processing {camera_id} camera")):
+            x = [batch[feature_name].to(device) for feature_name in feature_list]
+            x_masks = [batch[f'{feature_name}_mask'].to(device) for feature_name in feature_list]
+            y_true = [batch[task].to(device) for task in target_list]
+            y_true_masks = [batch[f'{task}_mask'].to(device) for task in target_list]
 
-            preds_heads = model(x, x_masks)
+            preds_heads, _ = model(x, x_masks)
             active_preds_heads = {task_name: preds_heads[task_name] for task_name in target_list}
 
             for i, task_name in enumerate(target_list):
@@ -250,18 +252,18 @@ def table_headpose(model):
         results[camera_id]['emotion_intensity'] = {}
 
         # calculate emotion_class on all emotion_intensity classes:
-        m = classification_metrics(y_score_emotion_class, y_true_emotion_class, n_classes=8)
+        m = classification_metrics(y_score_emotion_class, y_true_emotion_class, n_classes=7) # contempt is removed in poster runs
         results[camera_id]['emotion_class']['all'] = {'Support': int(sum(m['Support'])), 'F1': round(float(m['F1']), 2), 'ACC': round(float(m['ACC']), 2)}
         # calculate emotion_class on emotion_intensity classes:
         for emotion_intensity in range(3):
-            m = classification_metrics(y_score_emotion_class[y_true_emotion_intensity == emotion_intensity], y_true_emotion_class[y_true_emotion_intensity == emotion_intensity], n_classes=8)
+            m = classification_metrics(y_score_emotion_class[y_true_emotion_intensity == emotion_intensity], y_true_emotion_class[y_true_emotion_intensity == emotion_intensity], n_classes=7)
             results[camera_id]['emotion_class'][emotion_intensity] = {'Support': int(sum(m['Support'])), 'F1': round(float(m['F1']), 2), 'ACC': round(float(m['ACC']), 2)}
 
         # calculate emotion_intensity on all emotion_class classes:
         m = classification_metrics(y_score_emotion_intensity, y_true_emotion_intensity, n_classes=3)
         results[camera_id]['emotion_intensity']['all'] = {'Support': int(sum(m['Support'])), 'F1': round(float(m['F1']), 2), 'ACC': round(float(m['ACC']), 2)}
         # calculate emotion_intensity on emotion_class classes:
-        for emotion_class in range(8):
+        for emotion_class in range(7):
             m = classification_metrics(y_score_emotion_intensity[y_true_emotion_class == emotion_class], y_true_emotion_intensity[y_true_emotion_class == emotion_class], n_classes=3)
             results[camera_id]['emotion_intensity'][emotion_class] = {'Support': int(sum(m['Support'])), 'F1': round(float(m['F1']), 2), 'ACC': round(float(m['ACC']), 2)}
 
@@ -277,14 +279,14 @@ def table_headpose(model):
     print(create_results_table_camera(results))
 
 
-def modality_dropout(model, mode: str = 'avt'):
+def modality_dropout(model, mode: str = 'av', device: str = 'mps'):
 
     if mode == 'avt':
         feature_list = ['wavlm_baseplus', 'clip', 'xml_roberta']
         drop_feature_list_options = [['wavlm_baseplus', 'clip', 'xml_roberta'], ['wavlm_baseplus', 'clip'], ['wavlm_baseplus', 'xml_roberta'], ['clip', 'xml_roberta']]
     elif mode == 'av':
         feature_list = ['wavlm_baseplus', 'clip']
-        drop_feature_list_options = [['wavlm_baseplus', 'clip'], ['clip'], ['wavlm_baseplus']]
+        drop_feature_list_options = [['wavlm_baseplus'], ['clip'], ['wavlm_baseplus', 'clip']]
     else:
         raise ValueError(f'Unsupported mode {mode}')
 
@@ -300,13 +302,13 @@ def modality_dropout(model, mode: str = 'avt'):
         y_score_emotion_intensity = []
         y_true_emotion_intensity = []
 
-        for batch_ind, batch in enumerate(test_dataloader):
-            x = [batch[feature_name].to('cuda:0') for feature_name in feature_list]
-            x_masks = [batch[f'{feature_name}_mask'].to('cuda:0') for feature_name in feature_list]
-            y_true = [batch[task].to('cuda:0') for task in target_list]
-            y_true_masks = [batch[f'{task}_mask'].to('cuda:0') for task in target_list]
+        for batch_ind, batch in enumerate(tqdm(test_dataloader, desc=f"Processing {drop_feature_list} modality dropout")):
+            x = [batch[feature_name].to(device) for feature_name in feature_list]
+            x_masks = [batch[f'{feature_name}_mask'].to(device) for feature_name in feature_list]
+            y_true = [batch[task].to(device) for task in target_list]
+            y_true_masks = [batch[f'{task}_mask'].to(device) for task in target_list]
 
-            preds_heads = model(x, x_masks)
+            preds_heads, _ = model(x, x_masks)
             active_preds_heads = {task_name: preds_heads[task_name] for task_name in target_list}
 
             for i, task_name in enumerate(target_list):
@@ -337,18 +339,18 @@ def modality_dropout(model, mode: str = 'avt'):
         results[modality_name]['emotion_intensity'] = {}
 
         # calculate emotion_class on all emotion_intensity classes:
-        m = classification_metrics(y_score_emotion_class, y_true_emotion_class, n_classes=8)
+        m = classification_metrics(y_score_emotion_class, y_true_emotion_class, n_classes=7)
         results[modality_name]['emotion_class']['all'] = {'Support': int(sum(m['Support'])), 'F1': round(float(m['F1']), 2), 'ACC': round(float(m['ACC']), 2)}
         # calculate emotion_class on emotion_intensity classes:
         for emotion_intensity in range(3):
-            m = classification_metrics(y_score_emotion_class[y_true_emotion_intensity == emotion_intensity], y_true_emotion_class[y_true_emotion_intensity == emotion_intensity], n_classes=8)
+            m = classification_metrics(y_score_emotion_class[y_true_emotion_intensity == emotion_intensity], y_true_emotion_class[y_true_emotion_intensity == emotion_intensity], n_classes=7)
             results[modality_name]['emotion_class'][emotion_intensity] = {'Support': int(sum(m['Support'])), 'F1': round(float(m['F1']), 2), 'ACC': round(float(m['ACC']), 2)}
 
         # calculate emotion_intensity on all emotion_class classes:
         m = classification_metrics(y_score_emotion_intensity, y_true_emotion_intensity, n_classes=3)
         results[modality_name]['emotion_intensity']['all'] = {'Support': int(sum(m['Support'])), 'F1': round(float(m['F1']), 2), 'ACC': round(float(m['ACC']), 2)}
         # calculate emotion_intensity on emotion_class classes:
-        for emotion_class in range(8):
+        for emotion_class in range(7):
             m = classification_metrics(y_score_emotion_intensity[y_true_emotion_class == emotion_class], y_true_emotion_intensity[y_true_emotion_class == emotion_class], n_classes=3)
             results[modality_name]['emotion_intensity'][emotion_class] = {'Support': int(sum(m['Support'])), 'F1': round(float(m['F1']), 2), 'ACC': round(float(m['ACC']), 2)}
 
@@ -367,12 +369,12 @@ def modality_dropout(model, mode: str = 'avt'):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Script with improved argparse handling")
-    parser.add_argument("--model_config_path", type=str, default="configs/MDMTL/stage2/model_40_AV.yaml", help="Path to the Model config file")
-    parser.add_argument("--checkpoint_path", type=str, default="results/SD/stage2/mead_AV_ec_ei_40_all/checkpoint/checkpoint_valid_emotion_class_F1.ckpt", help="Path to the checkpoint file")
-    parser.add_argument("--mode", type=str, default="avt", help="Mode for modality dropout")
+    parser.add_argument("--model_config_path", type=str, default="configs/poster/MDMTL/stage2/model_40.yaml", help="Path to the Model config file")
+    parser.add_argument("--checkpoint_path", type=str, default="results/poster/MDMTL/stage2/poster_mdmtl_40/poster_ckpt/checkpoint_valid_combined_score.ckpt", help="Path to the checkpoint file")
+    parser.add_argument("--mode", type=str, default="av", help="Mode for modality dropout")
+    parser.add_argument("--device", type=str, default="mps", help="Device for inference")
     args = parser.parse_args()
 
-    model = get_model(checkpoint_path=args.checkpoint_path, config_path=args.model_config_path)
-    table_headpose(model)
-    modality_dropout(model, mode=args.mode)
-    exit()
+    model = get_model(checkpoint_path=args.checkpoint_path, config_path=args.model_config_path, device=args.device)
+    table_headpose(model, device=args.device)
+    modality_dropout(model, mode=args.mode, device=args.device)

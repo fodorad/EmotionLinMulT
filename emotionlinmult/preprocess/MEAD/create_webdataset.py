@@ -1,21 +1,32 @@
 from pathlib import Path
-from enum import Enum
 from tqdm import tqdm
 import webdataset as wds
 import numpy as np
-import pandas as pd
 import pickle
-import json
+from sklearn.model_selection import train_test_split
 from exordium.utils.padding import pad_or_crop_time_dim
 from emotionlinmult.preprocess import (
     CLIP_TIME_DIM, WAVLM_BASEPLUS_TIME_DIM, 
     CLIP_FEATURE_DIM, WAVLM_BASEPLUS_FEATURE_DIM,
     MEAD_CAMERA_ORIG2ID
 )
-from emotionlinmult.preprocess.MEAD import (
-    DB, DB_PROCESSED, SUBSET_PARTICIPANT_IDS,
-    parse_mead_visual_path
-)
+from emotionlinmult.preprocess.MEAD import DB, DB_PROCESSED
+
+
+PARTICIPANT_IDS = sorted([elem.name for elem in list(DB.glob("*")) if len(elem.name) == 4 and elem.name[0] in ['M', 'W']])
+MALE_IDS = [elem for elem in PARTICIPANT_IDS if elem[0] == 'M']
+FEMALE_IDS = [elem for elem in PARTICIPANT_IDS if elem[0] == 'W']
+
+MALE_IDS_TRAIN, MALE_IDS_REST = train_test_split(MALE_IDS, test_size=0.4, random_state=42)
+MALE_IDS_VALID, MALE_IDS_TEST = train_test_split(MALE_IDS_REST, test_size=0.5, random_state=42)
+FEMALE_IDS_TRAIN, FEMALE_IDS_REST = train_test_split(FEMALE_IDS, test_size=0.4, random_state=42)
+FEMALE_IDS_VALID, FEMALE_IDS_TEST = train_test_split(FEMALE_IDS_REST, test_size=0.5, random_state=42)
+
+SUBSET_PARTICIPANT_IDS = {
+    'train': MALE_IDS_TRAIN + FEMALE_IDS_TRAIN,
+    'valid': MALE_IDS_VALID + FEMALE_IDS_VALID,
+    'test':  MALE_IDS_TEST + FEMALE_IDS_TEST,
+}
 
 
 def get_mead_samples(participant_ids: list[str]):

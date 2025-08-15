@@ -67,11 +67,10 @@ def count_samples(cache_path: Path = DB_PROCESSED / "count_samples_va.json", ver
 
 if __name__ == "__main__":
 
-    count_samples(verbose=True)
-    exit()
+    #count_samples(verbose=True)
+    #exit()
 
-    test_dataset = create_dataset("test")
-    for i, sample in tqdm(enumerate(test_dataset), desc="Loading test samples"):
-        print(f"[test] {i}")
-        print(list(sample.keys()))
-        if i == 10: break
+    ds = create_dataset("train")
+    for i, sample in tqdm(enumerate(ds), desc="Loading train samples"):
+        print(f"[train] sample {i}")
+        # if i == 10: break

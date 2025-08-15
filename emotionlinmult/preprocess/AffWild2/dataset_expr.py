@@ -169,18 +169,15 @@ def compute_class_weights():
 if __name__ == "__main__":
 
     count_samples(verbose=True)
-    calculate_class_distribution()
-    exit()
+    #calculate_class_distribution()
+    #exit()
     
-    train_counts, class_weights = compute_class_weights()
-    print("Class counts:", train_counts) # tensor([160947,  81604,  28725,  65138,  14293,   4498,   8840,      0])
-    print("Class weights:", class_weights) # tensor([0.0917, 0.1810, 0.5141, 0.2267, 1.0331, 3.2829, 1.6704, 0.0000])
+    #train_counts, class_weights = compute_class_weights()
+    #print("Class counts:", train_counts) # tensor([160947,  81604,  28725,  65138,  14293,   4498,   8840,      0])
+    #print("Class weights:", class_weights) # tensor([0.0917, 0.1810, 0.5141, 0.2267, 1.0331, 3.2829, 1.6704, 0.0000])
 
-
-    test_dataset = create_dataset("test")
-    for i, sample in tqdm(enumerate(test_dataset), desc="Loading test samples"):
-        print(f"[test] {i}")
-        print(list(sample.keys()))
-        print(sample['__key__'], sample['emotion_class_fw.npy'], sample['emotion_class_fw.npy'].shape)
-        if i == 3: break
+    ds = create_dataset("train")
+    for i, sample in tqdm(enumerate(ds), desc="Loading train samples"):
+        print(f"[train] sample {i}")
+        # if i == 3: break
 

@@ -1,0 +1,88 @@
+model_name: LinMulT
+
+# input-output params
+input_feature_dim:
+  - 768 # wavlm_baseplus
+  - 1024 # clip
+
+# CM and SA transformer params
+d_model: 40
+n_heads: 8
+n_layers: 6
+attention_type: linear # linear, bigbird, softmax, mha
+n_layers_sa: 3
+
+dropout_embedding: 0
+dropout_relu: 0.3
+dropout_residual: 0.3
+dropout_output: 0
+
+# architecture params
+multimodal_signal: False
+n_layers_mms: 6
+time_dim_reducer: gap
+time_dim_aligner: aap
+aligned_time_dim: 300
+tam_fusion: False
+n_layers_fusion: 6
+unimodal_sat: False
+
+# task-specific output heads
+heads:
+  - name: emotion_class
+    type: sequence_aggregation
+    norm: bn
+    pooling: gap
+    hidden_dim: 128
+    dropout: 0.3
+    output_dim: 8 # classification
+  #- name: emotion_class_fw
+  #  type: sequence
+  #  norm: bn
+  #  pooling: gap
+  #  hidden_dim: 128
+  #  dropout: 0.3
+  #  output_dim: 8 # classification
+  - name: emotion_intensity
+    type: sequence_aggregation
+    norm: bn
+    pooling: gap
+    hidden_dim: 128
+    dropout: 0.3
+    output_dim: 3 # classification
+  - name: sentiment
+    type: sequence_aggregation
+    norm: bn
+    pooling: gap
+    hidden_dim: 128
+    dropout: 0.3
+    output_dim: 1 # regression [-3,+3]
+  #- name: sentiment_class
+  #  type: simple
+  #  pool: gap
+  #  output_dim: 3 # sentiment_class (neutral, positive, negative)
+  #- name: valence
+  #  type: sequence
+  #  norm: bn
+  #  pooling: gap
+  #  hidden_dim: 128
+  #  dropout: 0.3
+  #  output_dim: 1 # regression [-1,+1]
+  #- name: arousal
+  #  type: sequence
+  #  norm: bn
+  #  pooling: gap
+  #  hidden_dim: 128
+  #  dropout: 0.3
+  #  output_dim: 1 # regression [-1,+1]
+  #- name: tmm_wavlm_baseplus
+  #  type: upsample
+  #  input_time_dim: 300
+  #  output_time_dim: 500
+  #  output_dim: 768 # masked reconstruction (wavlm_baseplus)
+  #- name: tmm_clip
+  #  type: simple
+  #  output_dim: 1024 # masked reconstruction (clip)
+
+#model_stage1_cp_path: results/MTL/stage1/mosei_nipg38_gpu2/checkpoint/checkpoint_valid_loss.ckpt
+#model_stage2_cp_path: ...

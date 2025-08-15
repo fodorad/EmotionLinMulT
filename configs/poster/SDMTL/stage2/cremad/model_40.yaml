@@ -1,0 +1,65 @@
+model_name: LinMulT
+
+# input-output params
+input_feature_dim:
+  - 768 # wavlm_baseplus
+  - 1024 # clip
+
+# CM and SA transformer params
+d_model: 40
+n_heads: 8
+n_layers: 6
+attention_type: linear # linear, bigbird, softmax, mha
+n_layers_sa: 3
+
+dropout_embedding: 0
+dropout_relu: 0.3
+dropout_residual: 0.3
+dropout_output: 0
+
+# architecture params
+multimodal_signal: True
+n_layers_mms: 3
+time_dim_aligner: amp # aap
+aligned_time_dim: 300
+tam_fusion: True
+n_layers_fusion: 3
+unimodal_sat: True
+
+# task-specific output heads
+heads:
+  - name: emotion_class
+    type: sequence_aggregation
+    norm: bn
+    pooling: attentionpool
+    hidden_dim: 64
+    dropout: 0.3
+    output_dim: 7 # classification, poster run excludes contempt
+  - name: emotion_intensity
+    type: sequence_aggregation
+    norm: bn
+    pooling: attentionpool
+    hidden_dim: 64
+    dropout: 0.3
+    output_dim: 3 # classification
+
+# task-specific output auxiliary heads
+auxiliary_heads:
+  - name: emotion_class
+    type: sequence_aggregation
+    norm: bn
+    pooling: attentionpool
+    hidden_dim: 64
+    dropout: 0.3
+    output_dim: 7 # classification, poster run excludes contempt
+  - name: emotion_intensity
+    type: sequence_aggregation
+    norm: bn
+    pooling: attentionpool
+    hidden_dim: 64
+    dropout: 0.3
+    output_dim: 3 # classification
+
+
+#model_stage1_cp_path: results/MTL/stage1/mosei_nipg38_gpu2/checkpoint/checkpoint_valid_loss.ckpt
+#model_stage2_cp_path: ...

@@ -1,0 +1,56 @@
+# experiment
+output_dir: results/poster/SDMTL/stage2
+seed: 42
+
+accelerator: gpu
+strategy: auto
+devices:
+  - 0
+float32_matmul_precision: medium # high, highest
+
+tasks:
+  valence: # [-1, +1]
+    weight: 1.0
+    loss_fn: ccc_mse
+    metrics:
+      - CCC
+      - RMSE
+      - SAGR
+      - PCC
+  arousal:
+    weight: 1.0
+    loss_fn: ccc_mse
+    metrics:
+      - CCC
+      - RMSE
+      - SAGR
+      - PCC
+
+n_epochs: 75
+warmup_epochs: 5
+
+optimizer:
+  name: adam #adamw
+  base_lr: 0.001
+  #weight_decay: 0.00001
+
+awl:
+  lr: 0.01
+
+lr_scheduler:
+  name: CosineAnnealingWarmRestarts
+
+#early_stopping:
+#  monitor: valid_loss
+#  patience: 30
+#  mode: min
+
+checkpoints:
+  - name: checkpoint_valid_loss
+    monitor: valid_loss
+    mode: min
+  - name: checkpoint_valid_combined_score
+    monitor: valid_combined_score
+    mode: max
+
+stage: finetuning

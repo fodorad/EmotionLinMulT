@@ -4,6 +4,7 @@ import numpy as np
 import math
 from tqdm import tqdm
 from pathlib import Path
+from torch.utils.data import DataLoader
 from time import time
 import lightning.pytorch as L
 from functools import partial
@@ -44,11 +45,11 @@ class DatasetFactory:
         'afewva': (create_dataset_afewva, count_samples_afewva()),
         'affwild2_expr': (create_dataset_affwild2_expr, count_samples_affwild2_expr()),
         'affwild2_va': (create_dataset_affwild2_va, count_samples_affwild2_va()),
-        'celebvhq': (create_dataset_celebvhq, count_samples_celebvhq()),
+        #'celebvhq': (create_dataset_celebvhq, count_samples_celebvhq()),
         'cremad_expr': (create_dataset_cremad_expr, count_samples_cremad_expr()),
         'cremad_int': (create_dataset_cremad_int, count_samples_cremad_int()),
         'mead': (create_dataset_mead, count_samples_mead()),
-        'meld': (create_dataset_meld, count_samples_meld()),
+        #'meld': (create_dataset_meld, count_samples_meld()),
         'mosei': (create_dataset_mosei, count_samples_mosei()),
         'ravdess': (create_dataset_ravdess, count_samples_ravdess()),
     }
@@ -88,6 +89,7 @@ class DatasetFactory:
             datasets.append(dataset)
         return datasets
     
+    @staticmethod
     def get_dataset_sizes() -> dict[str, dict[str, int]]:
         return {
             db_name: {subset: size for subset, size in DatasetFactory.DATASET_CLASSES[db_name][1].items()} 
@@ -449,7 +451,7 @@ class MultiDatasetModule(L.LightningDataModule):
             pipeline,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            persistent_workers=True,
+            persistent_workers=self.num_workers > 0,
             shuffle=False
         )
 
@@ -481,34 +483,48 @@ class MultiDatasetModule(L.LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            persistent_workers=True,
+            persistent_workers=self.num_workers > 0,
             shuffle=False # dataset is already shuffled in _build_dataset
         )
         total_batches = (self.train_size + self.batch_size - 1) // self.batch_size
-        return loader.with_length(total_batches)
+        loader = loader.with_epoch(total_batches).with_length(total_batches)
+        return loader
+        
+    def _train_dataloader(self):
+        
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=False,  # dataset is already shuffled in _build_dataset
+            drop_last=False,
+        )
 
     def val_dataloader(self):
         loader = wds.WebLoader(
             self.valid_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            persistent_workers=True,
+            persistent_workers=self.num_workers > 0,
             shuffle=False
         )
         total_batches = (self.valid_size + self.batch_size - 1) // self.batch_size
-        return loader.with_length(total_batches)
+        loader = loader.with_epoch(total_batches).with_length(total_batches)
+        #loader.__len__ = lambda *arg, **kwarg: total_batches
+        return loader
 
     def test_dataloader(self):
         loader = wds.WebLoader(
             self.test_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            persistent_workers=True,
+            persistent_workers=self.num_workers > 0,
             shuffle=False
         )
         total_batches = (self.test_size + self.batch_size - 1) // self.batch_size
-        return loader.with_length(total_batches)
-
+        loader = loader.with_epoch(total_batches).with_length(total_batches)
+        #loader.__len__ = lambda *arg, **kwarg: total_batches
+        return loader
 
     def get_class_distribution(self, subset: str):
         if subset == 'train':
@@ -520,7 +536,7 @@ class MultiDatasetModule(L.LightningDataModule):
         else:
             raise ValueError(f"Unknown subset: {subset}")
 
-        emotion_class_counts = torch.zeros(8, dtype=torch.int64)  # 8 unified emotion classes
+        emotion_class_counts = torch.zeros(7, dtype=torch.int64)  # 8 unified emotion classes, but no contempt
         intensity_class_counts = torch.zeros(3, dtype=torch.int64)  # 3 unified intensity classes
         for batch in tqdm(dataloader, desc=f"Counting classes"):
             for elem in batch['emotion_class'][batch['emotion_class_mask']]:

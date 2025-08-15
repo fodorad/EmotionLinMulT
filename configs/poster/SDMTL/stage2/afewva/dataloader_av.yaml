@@ -1,0 +1,65 @@
+seed: 42
+
+feature_list:
+  - wavlm_baseplus # (T_a, 768) WavLM Base+
+  - clip # (T_v, 1024) CLIP
+
+target_list:
+  #- emotion_class # 7 classes, poster run excludes contempt
+  #- emotion_class_fw # 7 classes, poster run excludes contempt
+  #- emotion_intensity # 3 classes
+  #- sentiment # [-3, +3]
+  - valence # [-1, +1]
+  - arousal # [-1, +1]
+
+datasets:
+  train:
+    - afewva # V (face), VA
+    #- affwild2_expr # AV, emotion class fw, 7 classes, no contempt
+    #- affwild2_va # AV, VA
+    #- caer # AVT, emotion class, 7 classes, no contempt
+    #- celebv_hq # AV, emotion class, 8 classes
+    #- cremad_expr # AV, emotion class, 6 classes, no surprise and contempt
+    #- cremad_int # AV, emotion intensity, 3 classes
+    #- mead # AV, emotion class, 8 classes, emotion intensity, 3 classes
+    #- meld # AVT, emotion class, 7 classes, no contempt, sentiment class, 3 classes
+    #- mosei # AVT, sentiment
+    #- ravdess # AV, emotion class, 7 classes, no contempt, emotion intensity, 3 classes
+    #- veatic # V, VA
+  valid:
+    - afewva # V (face), VA
+    #- affwild2_expr # AV, emotion class fw, 7 classes, no contempt
+    #- affwild2_va # AV, VA
+    #- caer # AVT, emotion class, 7 classes, no contempt
+    #- celebv_hq # AV, emotion class, 8 classes
+    #- cremad_expr # AV, emotion class, 6 classes, no surprise and contempt
+    #- cremad_int # AV, emotion intensity, 3 classes
+    #- mead # AV, emotion class, 8 classes, emotion intensity, 3 classes
+    #- meld # AVT, emotion class, 7 classes, no contempt, sentiment class, 3 classes
+    #- mosei # AVT, sentiment
+    #- ravdess # AV, emotion class, 7 classes, no contempt, emotion intensity, 3 classes
+    #- veatic # V, VA
+  test:
+    - afewva # V (face), VA
+    #- affwild2_expr # AV, emotion class fw, 7 classes, no contempt
+    #- affwild2_va # AV, VA
+    #- caer # AVT, emotion class, 7 classes, no contempt
+    #- celebv_hq # AV, emotion class, 8 classes
+    #- cremad_expr # AV, emotion class, 6 classes, no surprise and contempt
+    #- cremad_int # AV, emotion intensity, 3 classes
+    #- mead # AV, emotion class, 8 classes, emotion intensity, 3 classes
+    #- meld # AVT, emotion class, 7 classes, no contempt, sentiment class, 3 classes
+    #- mosei # AVT, sentiment
+    #- ravdess # AV, emotion class, 7 classes, no contempt, emotion intensity, 3 classes
+    #- veatic # V, VA
+
+modality_dropout: 0.3      # Probability to drop modalities
+feature_corruption: 0.3    # Probability to corrupt features with Gaussian noise
+block_dropout: 0.3         # Probability to drop blocks of features
+block_length: 15           # ~0.5s at 30fps
+num_block_drops: 2         # Number of blocks to drop per sequence
+min_gap_between_blocks: 5  # Minimum frames between dropped blocks
+
+batch_size: 64 # ~10GB VRAM, 35GB RAM
+num_workers: 8
+# shuffle_buffer_size: 300 # otherwise min(batch_size * 5, 300)

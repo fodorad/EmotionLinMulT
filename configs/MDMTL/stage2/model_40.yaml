@@ -37,7 +37,6 @@ heads:
   - name: emotion_class_fw
     type: sequence
     norm: bn
-    pooling: gap
     hidden_dim: 128
     dropout: 0.3
     output_dim: 8 # classification

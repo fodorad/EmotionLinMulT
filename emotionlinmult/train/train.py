@@ -1,25 +1,21 @@
-import os, gc
+import os
 import json
-import argparse
-import yaml
-from pprint import pprint
 from pathlib import Path
 from datetime import datetime
-from typing import Callable, Dict, List, Optional, Any, Union
-import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
 import lightning as L
-from lightning.pytorch.loggers import CSVLogger
 from lightning.pytorch import seed_everything
 from lightning.pytorch.callbacks import GradientAccumulationScheduler
-from linmult import LinMulT, LinT, load_config
+from linmult import LinMulT, LinT
 from emotionlinmult.train.parser import argparser
 from emotionlinmult.train.history import History
-from emotionlinmult.train.loss import multitarget_loss, consistency_loss, AutomaticWeightedLoss
+from emotionlinmult.train.loss import multitarget_loss, AutomaticWeightedLoss
 from emotionlinmult.train.metrics_running import RunningMetrics
-from emotionlinmult.train.datamodule import MultiDatasetModule
+#from emotionlinmult.train.datamodule import MultiDatasetModule
+from emotionlinmult.train.datamodule_hdf5 import MultiDatasetModule
+from emotionlinmult.train.orthogonal_wrapper import OrthogonalModelWrapper
 
 
 class ModelWrapper(L.LightningModule):
@@ -31,14 +27,14 @@ class ModelWrapper(L.LightningModule):
 
         self.model = model
 
-        if config.get('lembda_augmentor', False): 
-            self.augmentors = nn.ModuleList([
-                FeatureAugmentor(768), # wavlm baseplus
-                FeatureAugmentor(1024), # clip
-            ])
+        #if config.get('lembda_augmentor', False): 
+        #    self.augmentors = nn.ModuleList([
+        #        FeatureAugmentor(768), # wavlm baseplus
+        #        FeatureAugmentor(1024), # clip
+        #    ])
 
         self.tasks = config['tasks']
-        self.consistency_rules = config.get('consistency_rules', [])
+        #self.consistency_rules = config.get('consistency_rules', [])
         self.stage = config.get('stage', 'tmm_pretraining')  # 'tmm_pretraining' for pretraining, 'finetuning' for finetuning
 
         # Initialize metrics for each phase
@@ -65,6 +61,25 @@ class ModelWrapper(L.LightningModule):
             self.awl = None
 
 
+    def aux_loss_scheduling(self, current_epoch):
+        if current_epoch < 10:
+            # First phase: 0.6 main, 0.2 aux1, 0.2 aux2
+            main_weight = 0.8
+            aux_weight = 0.1
+            num_modalities = len(self.config['feature_list'])
+            modality_wise = [aux_weight / num_modalities for _ in range(num_modalities)]
+            return main_weight, modality_wise
+        #elif current_epoch < 15:
+        #    # Second phase: 0.8 main, 0.1 aux1, 0.1 aux2
+        #    main_weight = 0.8
+        #    aux_weight = 0.2
+        #    num_modalities = len(self.config['feature_list'])
+        #    modality_wise = [aux_weight / num_modalities for _ in range(num_modalities)]
+        #    return main_weight, modality_wise
+        else:
+            # Final phase: 1.0 main, 0 aux1, 0 aux2
+            return 1.0, [0.0, 0.0]
+
     def forward(self, x, masks=None):
         return self.model(x, masks)
 
@@ -76,24 +91,43 @@ class ModelWrapper(L.LightningModule):
         y_true_masks = [batch[f'{task}_mask'] for task in self.tasks]  # list of shapes [(B,) or (B, T), ...]
 
         # Forward pass
-        preds_heads = self(x, x_masks)  # dict of {task_name: tensor}
+        if self.config.get('auxiliary_heads', False):
+            preds_heads, all_aux_heads = self(x, x_masks)
+        else:
+            preds_heads = self(x, x_masks)
+        
         active_preds_heads = {task_name: preds_heads[task_name] for task_name in self.tasks}
 
-        # Compute loss
+        # Compute main loss
         loss = multitarget_loss(active_preds_heads, y_true, y_true_masks, self.tasks, awl=self.awl)
 
-        # lembda augmentor
-        if self.config.get('lembda_augmentor', False):
-            x_aug = [_aug(_x) for _x, _aug in zip(x, self.augmentors)]
-            preds_heads_aug = self(x_aug, x_masks)
-            active_preds_heads_aug = {task_name: preds_heads_aug[task_name] for task_name in self.tasks}
-            loss_aug = multitarget_loss(active_preds_heads_aug, y_true, y_true_masks, self.tasks, awl=self.awl)
-            consistency = 0
-            for task_name in active_preds_heads.keys():
-                orig = active_preds_heads[task_name]
-                aug = active_preds_heads_aug[task_name]
-                consistency += nn.functional.mse_loss(orig, aug)
-            loss += 0.5 * loss_aug + 0.5 * consistency
+        # Calculate auxiliary losses
+        current_epoch = self.trainer.current_epoch
+        if self.config.get('auxiliary_heads', False) and current_epoch < 10:
+            main_weight, aux_weights = self.aux_loss_scheduling(current_epoch)
+            loss = main_weight * loss
+            assert len(all_aux_heads) == len(aux_weights)
+            ignore_sequence_tasks = {'emotion_class_fw', 'valence', 'arousal'}
+            for ind, (aux_heads, aux_weight) in enumerate(zip(all_aux_heads, aux_weights)):
+                active_aux_heads = {task: aux_heads[task + f'_{ind}'] for task in self.tasks if task not in ignore_sequence_tasks}
+                y_true_aux = [batch[task] for task in self.tasks if task not in ignore_sequence_tasks]
+                y_true_masks_aux = [batch[f'{task}_mask'] for task in self.tasks if task not in ignore_sequence_tasks]
+                tasks_aux = {task: self.tasks[task] for task in self.tasks if task not in ignore_sequence_tasks}
+                aux_loss = multitarget_loss(active_aux_heads, y_true_aux, y_true_masks_aux, tasks_aux, awl=None)
+                loss += aux_weight * aux_loss
+
+        # lembda augmentor
+        #if self.config.get('lembda_augmentor', False):
+        #    x_aug = [_aug(_x) for _x, _aug in zip(x, self.augmentors)]
+        #    preds_heads_aug = self(x_aug, x_masks)
+        #    active_preds_heads_aug = {task_name: preds_heads_aug[task_name] for task_name in self.tasks}
+        #    loss_aug = multitarget_loss(active_preds_heads_aug, y_true, y_true_masks, self.tasks, awl=self.awl)
+        #    consistency = 0
+        #    for task_name in active_preds_heads.keys():
+        #        orig = active_preds_heads[task_name]
+        #        aug = active_preds_heads_aug[task_name]
+        #        consistency += nn.functional.mse_loss(orig, aug)
+        #    loss += 0.5 * loss_aug + 0.5 * consistency
 
         # Update metrics
         for i, (task_name, task_info) in enumerate(self.tasks.items()):
@@ -113,6 +147,32 @@ class ModelWrapper(L.LightningModule):
         # Log metrics for training
         train_metrics = self.train_metrics.compute()
         
+        values = []
+        for task_name, metric_dict in train_metrics.items():
+            if task_name == 'emotion_class':
+                values.append(metric_dict['F1'].item())
+            elif task_name == 'emotion_class_fw':
+                values.append(metric_dict['F1'].item())
+            elif task_name == 'emotion_intensity':
+                values.append(metric_dict['F1'].item())
+            elif task_name == 'sentiment':
+                values.append(metric_dict['F1_7'].item())
+            elif task_name == 'valence':
+                values.append(metric_dict['CCC'].item())
+            elif task_name == 'arousal':
+                values.append(metric_dict['CCC'].item())
+        composite_score = float(np.mean(values))
+
+        self.log("train_combined_score", composite_score, prog_bar=True, logger=True, on_epoch=True)
+        self.history.update(
+            phase="train", 
+            task="all", 
+            metric="combined_score", 
+            value=composite_score, 
+            epoch=self.current_epoch
+        )
+        self.history.plot("all", "combined_score")
+
         for task_name, metrics in train_metrics.items():
             task_info = self.tasks[task_name]
             for metric_name, metric_value in metrics.items():
@@ -157,7 +217,7 @@ class ModelWrapper(L.LightningModule):
         self.history.save()
 
         if self.awl is not None:
-            print('awl weights:', [round(float(elem), 2) for elem in self.awl.params])
+            print('awl weights:', [round(float(elem.detach().cpu()), 2) for elem in self.awl.params])
 
 
     def validation_step(self, batch, batch_idx):
@@ -167,11 +227,30 @@ class ModelWrapper(L.LightningModule):
         y_true_masks = [batch[f'{task}_mask'] for task in self.tasks]
 
         # Forward pass
-        preds_heads = self(x, x_masks)
+        if self.config.get('auxiliary_heads', False):
+            preds_heads, all_aux_heads = self(x, x_masks)
+        else:
+            preds_heads = self(x, x_masks)
+        
         active_preds_heads = {task_name: preds_heads[task_name] for task_name in self.tasks}
 
-        # Compute loss
+        # Compute main loss
         loss = multitarget_loss(active_preds_heads, y_true, y_true_masks, self.tasks, awl=self.awl)
+
+        # Calculate auxiliary losses
+        current_epoch = self.trainer.current_epoch
+        if self.config.get('auxiliary_heads', False) and current_epoch < 10:
+            main_weight, aux_weights = self.aux_loss_scheduling(current_epoch)
+            loss = main_weight * loss
+            assert len(all_aux_heads) == len(aux_weights)
+            ignore_sequence_tasks = {'emotion_class_fw', 'valence', 'arousal'}
+            for ind, (aux_heads, aux_weight) in enumerate(zip(all_aux_heads, aux_weights)):
+                active_aux_heads = {task: aux_heads[task + f'_{ind}'] for task in self.tasks if task not in ignore_sequence_tasks}
+                y_true_aux = [batch[task] for task in self.tasks if task not in ignore_sequence_tasks]
+                y_true_masks_aux = [batch[f'{task}_mask'] for task in self.tasks if task not in ignore_sequence_tasks]
+                tasks_aux = {task: self.tasks[task] for task in self.tasks if task not in ignore_sequence_tasks}
+                aux_loss = multitarget_loss(active_aux_heads, y_true_aux, y_true_masks_aux, tasks_aux, awl=None)
+                loss += aux_weight * aux_loss
 
         # Update metrics
         for i, (task_name, task_info) in enumerate(self.tasks.items()):
@@ -191,7 +270,7 @@ class ModelWrapper(L.LightningModule):
         val_metrics = self.val_metrics.compute()
 
         values = []
-        for i, (task_name, metric_dict) in enumerate(val_metrics.items()):
+        for task_name, metric_dict in val_metrics.items():
             if task_name == 'emotion_class':
                 values.append(metric_dict['F1'].item())
             elif task_name == 'emotion_class_fw':
@@ -199,12 +278,11 @@ class ModelWrapper(L.LightningModule):
             elif task_name == 'emotion_intensity':
                 values.append(metric_dict['F1'].item())
             elif task_name == 'sentiment':
-                values.append(metric_dict['MAE'].item())  # lower better, maybe rescale
+                values.append(metric_dict['F1_7'].item())
             elif task_name == 'valence':
                 values.append(metric_dict['CCC'].item())
             elif task_name == 'arousal':
                 values.append(metric_dict['CCC'].item())
-
         composite_score = float(np.mean(values))
 
         self.log("valid_combined_score", composite_score, prog_bar=True, logger=True, on_epoch=True)
@@ -215,7 +293,7 @@ class ModelWrapper(L.LightningModule):
             value=composite_score, 
             epoch=self.current_epoch
         )
-        self.history.plot("all", "combined_score")
+        # self.history.plot("all", "combined_score")
 
         for task_name, metrics in val_metrics.items():
             task_info = self.tasks[task_name]
@@ -271,7 +349,11 @@ class ModelWrapper(L.LightningModule):
         y_true_masks = [batch[f'{task}_mask'] for task in self.tasks]  # list of shapes [(B, T), ...] or [(B, F), ...]
 
         # Forward pass
-        preds_heads = self(x, x_masks)
+        if self.config.get('auxiliary_heads', False):
+            preds_heads, all_aux_heads = self(x, x_masks)
+        else:
+            preds_heads = self(x, x_masks)
+
         active_preds_heads = {task_name: preds_heads[task_name] for task_name in self.tasks}
 
         # Update metrics and store predictions for each task
@@ -290,8 +372,8 @@ class ModelWrapper(L.LightningModule):
                 'target': target,
                 'mask': mask,
                 'task': task_name,
-                'dataset': batch['dataset'],
-                'key': batch['__key__']
+                'dataset': batch['datasets'],
+                'key': batch['keys']
             }
             self.test_benchmark.append(batch_info)
 
@@ -438,9 +520,18 @@ class ModelWrapper(L.LightningModule):
         
         for dataset, tasks in predictions.items():
             output_path = output_dir / f'test_{dataset.lower()}.json'
+
+            if output_path.exists():
+                print(str(output_path) + ' already exists... Skip.')
+                continue
+            else:
+                print('Saving predictions to ' + str(output_path))
+
             with open(output_path, 'w') as f:
                 json.dump(tasks, f, indent=2)
-        
+            
+            print(str(output_path) + ' saved.')
+
         print(f"Predictions saved to {output_dir}")
 
 
@@ -597,9 +688,15 @@ def train_model(config: dict):
         checkpoint = torch.load(config['model_stage1_cp_path'], weights_only=True, map_location="cpu")
         state_dict = {k.replace('model.', ''): v for k, v in checkpoint['state_dict'].items()}
         model.load_state_dict(state_dict)
-        lightning_model = ModelWrapper(model, config=config)
+        if config.get('orthogonal', False):
+            lightning_model = OrthogonalModelWrapper(model, config=config)
+        else:
+            lightning_model = ModelWrapper(model, config=config)
     else:
-        lightning_model = ModelWrapper(model, config=config)
+        if config.get('orthogonal', False):
+            lightning_model = OrthogonalModelWrapper(model, config=config)
+        else:
+            lightning_model = ModelWrapper(model, config=config)
 
     # Define the callbacks and logger
     callbacks = []
@@ -629,8 +726,10 @@ def train_model(config: dict):
         callbacks.append(early_stopping)
 
     csv_logger = L.pytorch.loggers.CSVLogger(save_dir=str(experiment_dir), name="csv_logs")
-    accumulator = GradientAccumulationScheduler(scheduling={0: 10, 35: 5, 50: 1})
-    callbacks.append(accumulator)
+
+    if not config.get('orthogonal', False):
+        accumulator = GradientAccumulationScheduler(scheduling={0: 5, 35: 3, 60: 1})
+        callbacks.append(accumulator)
 
     # Define the trainer
     trainer = L.Trainer(
@@ -645,7 +744,7 @@ def train_model(config: dict):
         limit_train_batches=3 if 'dev' in config else 1.0,
         limit_val_batches=3 if 'dev' in config else 1.0,
         limit_test_batches=3 if 'dev' in config else 1.0,
-        gradient_clip_val=1.0
+        gradient_clip_val=None if config.get('orthogonal', False) else config.get('clip_grad_norm', None)
     )
 
     # Train the model
@@ -666,11 +765,14 @@ def train_model(config: dict):
         checkpoint_path = checkpoints[config.get('checkpoints_auto_index', 1)].best_model_path
         print(f"Loading best model from: {checkpoint_path}")
 
-    checkpoint = torch.load(checkpoint_path, weights_only=True, map_location=torch.device(f'cuda:{config.get("devices", [0])[0]}'))
+    checkpoint = torch.load(checkpoint_path, weights_only=True, map_location=torch.device('cpu'))
     state_dict = {k.replace('model.', ''): v for k, v in checkpoint['state_dict'].items() if 'awl' not in k}
     state_dict = {k: v for k, v in state_dict.items() if 'augmentors' not in k}
     model.load_state_dict(state_dict)
-    lightning_model = ModelWrapper(model, config=config)
+    if config.get('orthogonal', False):
+        lightning_model = OrthogonalModelWrapper(model, config=config)
+    else:
+        lightning_model = ModelWrapper(model, config=config)
     test_results = trainer.test(lightning_model, datamodule=data_module)
 
 

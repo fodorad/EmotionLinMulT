@@ -2,11 +2,9 @@ import json
 import pprint
 from pathlib import Path
 from tqdm import tqdm
-import numpy as np
 import torch
 import webdataset as wds
 from emotionlinmult.preprocess import (
-    CLIP_TIME_DIM, WAVLM_BASEPLUS_TIME_DIM, CLIP_FEATURE_DIM, WAVLM_BASEPLUS_FEATURE_DIM,
     RAVDESS_EMOTION_MAPPING, RAVDESS_INTENSITY_MAPPING
 )
 from emotionlinmult.preprocess.RAVDESS import DB_PROCESSED
@@ -166,13 +164,10 @@ def calculate_class_distribution():
 if __name__ == "__main__":
 
     count_samples()
-    calculate_class_distribution()
+    #calculate_class_distribution()
+    #exit()
 
-    exit()
-
-    test_dataset = create_dataset("test")
-    for i, sample in tqdm(enumerate(test_dataset), desc="Loading test samples"):
-        print(f"[test] {i}")
-        print(list(sample.keys()))
-        print(sample['emotion_intensity.npy'].item(), sample['emotion_intensity_mask.npy'].item())
-        if i == 10: break
+    ds = create_dataset("train")
+    for i, sample in tqdm(enumerate(ds), desc="Loading train samples"):
+        print(f"[train] {i}")
+        #if i == 10: break

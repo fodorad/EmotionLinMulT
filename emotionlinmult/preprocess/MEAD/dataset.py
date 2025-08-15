@@ -46,7 +46,7 @@ def get_shard_urls(subset: str):
     pattern = f"mead_{subset}_*.tar"
     shard_files = sorted(webdataset_dir.glob(pattern))
     urls = [str(f) for f in shard_files]
-    if not urls: raise FileNotFoundError(f"No shards found for pattern {subset} in {webdataset_dir}")
+    if not urls: raise FileNotFoundError(f"No shards found for pattern {pattern} in {webdataset_dir}")
     return urls
 
 
@@ -55,6 +55,7 @@ def create_dataset(
         camera_id: int | None = None,
         drop_feature_list: list[str] | None = None,
         shuffle_buffer_size: int = 300,
+        no_contempt: bool = True, # TODO: POSTER ONLY
     ): # camera_id 1: front
     urls = get_shard_urls(subset)
 
@@ -72,6 +73,11 @@ def create_dataset(
         wds.map(lambda x: _process_sample(x, drop_feature_list=drop_feature_list)),
         wds.shuffle(shuffle_buffer_size if subset == 'train' else False),
     ]
+
+    if no_contempt:
+        pipeline += [
+            wds.select(lambda sample: sample['emotion_class.npy'].item() != 7)
+        ]
 
     return wds.DataPipeline(*pipeline)
 
@@ -188,12 +194,19 @@ def calculate_class_distribution():
 if __name__ == "__main__":
 
     count_samples(verbose=True)
-    calculate_class_distribution()
-    exit()
+    #calculate_class_distribution()
+    #exit()
 
+    ds = create_dataset("test")
+    for i, sample in tqdm(enumerate(ds), desc="Loading test samples"):
+        print(f"[test] sample {i}")
+        #if i == 10: break
+
+    """
     for camera_id in range(0, 7):
         test_dataset = create_dataset("test", camera_id=camera_id)
         for i, sample in tqdm(enumerate(test_dataset), desc="Loading test samples"):
             print(f"\n[test] {i}: {sample['__key__']} {sample['camera_id.npy'].item()} {sample['emotion_class.npy'].item()} {sample['emotion_intensity.npy'].item()}")
             #if i == 3: 
             break
+    """

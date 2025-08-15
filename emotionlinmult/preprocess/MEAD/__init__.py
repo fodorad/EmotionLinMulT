@@ -1,24 +1,8 @@
 from pathlib import Path
-from sklearn.model_selection import train_test_split
 
 
 DB = Path('data/db/MEAD')
 DB_PROCESSED = Path('data/db_processed/MEAD')
-
-PARTICIPANT_IDS = sorted([elem.name for elem in list(DB.glob("*")) if len(elem.name) == 4 and elem.name[0] in ['M', 'W']])
-MALE_IDS = [elem for elem in PARTICIPANT_IDS if elem[0] == 'M']
-FEMALE_IDS = [elem for elem in PARTICIPANT_IDS if elem[0] == 'W']
-
-MALE_IDS_TRAIN, MALE_IDS_REST = train_test_split(MALE_IDS, test_size=0.4, random_state=42)
-MALE_IDS_VALID, MALE_IDS_TEST = train_test_split(MALE_IDS_REST, test_size=0.5, random_state=42)
-FEMALE_IDS_TRAIN, FEMALE_IDS_REST = train_test_split(FEMALE_IDS, test_size=0.4, random_state=42)
-FEMALE_IDS_VALID, FEMALE_IDS_TEST = train_test_split(FEMALE_IDS_REST, test_size=0.5, random_state=42)
-
-SUBSET_PARTICIPANT_IDS = {
-    'train': MALE_IDS_TRAIN + FEMALE_IDS_TRAIN,
-    'valid': MALE_IDS_VALID + FEMALE_IDS_VALID,
-    'test':  MALE_IDS_TEST + FEMALE_IDS_TEST,
-}
 
 
 def parse_mead_acoustic_path(path: Path) -> dict:

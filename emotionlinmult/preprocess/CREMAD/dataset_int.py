@@ -2,14 +2,9 @@ import torch
 import json
 import pprint
 import webdataset as wds
-import numpy as np
 from pathlib import Path
 from tqdm import tqdm
-from emotionlinmult.preprocess import (
-    CREMAD_EMOTION_MAPPING, 
-    CREMAD_INTENSITY_MAPPING, 
-    CREMAD_INTENSITY_NAME2ORIG
-)
+from emotionlinmult.preprocess import CREMAD_INTENSITY_MAPPING
 from emotionlinmult.preprocess.CREMAD import DB_PROCESSED
 
 
@@ -161,13 +156,10 @@ if __name__ == "__main__":
     #exit()
 
     count_samples(verbose=True)
-    calculate_class_distribution()
-    exit()
+    #calculate_class_distribution()
+    #exit()
 
-    test_dataset = create_dataset("test")
-    for i, sample in tqdm(enumerate(test_dataset), desc="Loading test samples"):
-        print(f"[test] {i}")
-        print(list(sample.keys()))
-        print(sample['emotion_class.npy'].item(), sample['emotion_class_mask.npy'].item())
-        print(sample['emotion_intensity.npy'].item(), sample['emotion_intensity_mask.npy'].item())
-        if i == 10: break
+    ds = create_dataset("train")
+    for i, sample in tqdm(enumerate(ds), desc="Loading train samples"):
+        print(f"[train] {i}")
+        #if i == 10: break

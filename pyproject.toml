@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "emotionlinmult"
-version = "0.4.0"
+version = "0.5.0"
 description = "EmotionLinMulT: Transformer-based Emotion Understanding."
 keywords = ["preprocess", "audio", "video", "text", "multimodal", "emotion", "intensity"]
 authors = [

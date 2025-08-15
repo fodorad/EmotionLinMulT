@@ -1,9 +1,6 @@
 import argparse
-import time
-from pathlib import Path
 from tqdm import tqdm
 from exordium.video.clip import ClipWrapper
-from emotionlinmult.preprocess import MEAD_EMOTION_MAPPING, MEAD_CAMERA_ORIG2ID, MEAD_EMOTION_NAME2ORIG
 from emotionlinmult.preprocess.MEAD import DB, DB_PROCESSED, parse_mead_visual_path
 
 
