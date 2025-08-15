@@ -3,9 +3,7 @@ from tqdm import tqdm
 import pandas as pd
 import pickle
 from exordium.text.xml_roberta import XmlRobertaWrapper
-
-
-DB_PROCESSED = Path("data/db_processed/MOSEI")
+from emotionlinmult.preprocess.MOSEI import DB_PROCESSED
 
 
 def get_annotation(csv_path: str, subset: str):

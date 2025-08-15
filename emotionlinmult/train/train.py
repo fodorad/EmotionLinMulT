@@ -1,11 +1,11 @@
-import os
+import os, gc
 import json
 import argparse
 import yaml
 from pprint import pprint
 from pathlib import Path
 from datetime import datetime
-from typing import Callable
+from typing import Callable, Dict, List, Optional, Any, Union
 import pandas as pd
 import numpy as np
 import torch
@@ -13,12 +13,12 @@ import torch.nn as nn
 import lightning as L
 from lightning.pytorch.loggers import CSVLogger
 from lightning.pytorch import seed_everything
-
+from lightning.pytorch.callbacks import GradientAccumulationScheduler
 from linmult import LinMulT, LinT, load_config
 from emotionlinmult.train.parser import argparser
 from emotionlinmult.train.history import History
-from emotionlinmult.train.loss import multitarget_loss, consistency_loss
-from emotionlinmult.train.metrics import calculate_sentiment, calculate_sentiment_class
+from emotionlinmult.train.loss import multitarget_loss, consistency_loss, AutomaticWeightedLoss
+from emotionlinmult.train.metrics_running import RunningMetrics
 from emotionlinmult.train.datamodule import MultiDatasetModule
 
 
@@ -30,25 +30,39 @@ class ModelWrapper(L.LightningModule):
         self.save_hyperparameters('config')
 
         self.model = model
+
+        if config.get('lembda_augmentor', False): 
+            self.augmentors = nn.ModuleList([
+                FeatureAugmentor(768), # wavlm baseplus
+                FeatureAugmentor(1024), # clip
+            ])
+
         self.tasks = config['tasks']
-        self.consistency_rules = config['consistency_rules']
+        self.consistency_rules = config.get('consistency_rules', [])
+        self.stage = config.get('stage', 'tmm_pretraining')  # 'tmm_pretraining' for pretraining, 'finetuning' for finetuning
 
-        self.train_preds = []
-        self.train_targets = []
-        self.train_masks = []
+        # Initialize metrics for each phase
+        self.train_metrics = RunningMetrics(self.tasks)
+        self.val_metrics = RunningMetrics(self.tasks)
+        self.test_metrics = RunningMetrics(self.tasks)
 
-        self.valid_preds = []
-        self.valid_targets = []
-        self.valid_masks = []
-
-        self.test_preds = []
-        self.test_targets = []
-        self.test_masks = []
-
-        self.test_info = []
+        # Store predictions and targets for test set (for final evaluation)
+        self.test_benchmark = []
 
         self.log_dir = Path(config['experiment_dir'])
         self.history = History(self.log_dir)
+
+        if self.stage not in {'tmm_pretraining', 'finetuning'}:
+            raise ValueError(f"Invalid stage: {self.stage}. Must be 'tmm_pretraining' or 'finetuning'.")
+        
+        if 'awl' in self.config:
+            if self.stage == 'finetuning':
+                num_task = len([task for task in self.tasks if 'tmm_' not in task])
+            else: # pretraining
+                num_task = len([task for task in self.tasks if 'tmm_' in task])
+            self.awl = AutomaticWeightedLoss(num_task)
+        else:
+            self.awl = None
 
 
     def forward(self, x, masks=None):
@@ -56,246 +70,378 @@ class ModelWrapper(L.LightningModule):
 
 
     def training_step(self, batch, batch_idx):
-        x = [batch[feature_name] for feature_name in self.config['feature_list']] # list of shapes [(B, T, F), ...]
-        x_masks = [batch[f'{feature_name}_mask'] for feature_name in self.config['feature_list']] # list of shapes [(B, T), ...]
-        y_true = [batch[task] for task in self.tasks] # list of shapes [(B,) or (B, T), ...]. sentiment: (B,), sentiment_class: (B,)
-        y_true_masks = [batch[f'{task}_mask'] for task in self.tasks] # list of shapes [(B,) or (B, T), ...]
+        x = [batch[feature_name] for feature_name in self.config['feature_list']]  # list of shapes [(B, T, F), ...]
+        x_masks = [batch[f'{feature_name}_mask'] for feature_name in self.config['feature_list']]  # list of shapes [(B, T), ...]
+        y_true = [batch[task] for task in self.tasks]  # list of shapes [(B,) or (B, T), ...]
+        y_true_masks = [batch[f'{task}_mask'] for task in self.tasks]  # list of shapes [(B,) or (B, T), ...]
 
-        preds_heads = self(x, x_masks) # list of output heads. sentiment: (B, 1), sentiment_class: (B, 3)
-        loss = multitarget_loss(preds_heads, y_true, y_true_masks, self.tasks)
+        # Forward pass
+        preds_heads = self(x, x_masks)  # dict of {task_name: tensor}
+        active_preds_heads = {task_name: preds_heads[task_name] for task_name in self.tasks}
 
-        if self.consistency_rules:
-            loss += consistency_loss(preds_heads, self.tasks, self.consistency_rules)
+        # Compute loss
+        loss = multitarget_loss(active_preds_heads, y_true, y_true_masks, self.tasks, awl=self.awl)
 
-        self.log('train_loss', loss, prog_bar=False, logger=True, on_step=True, on_epoch=False, batch_size=self.config['batch_size'])
-        self.train_preds.append(preds_heads)
-        self.train_targets.append(y_true)
-        self.train_masks.append(y_true_masks)
+        # lembda augmentor
+        if self.config.get('lembda_augmentor', False):
+            x_aug = [_aug(_x) for _x, _aug in zip(x, self.augmentors)]
+            preds_heads_aug = self(x_aug, x_masks)
+            active_preds_heads_aug = {task_name: preds_heads_aug[task_name] for task_name in self.tasks}
+            loss_aug = multitarget_loss(active_preds_heads_aug, y_true, y_true_masks, self.tasks, awl=self.awl)
+            consistency = 0
+            for task_name in active_preds_heads.keys():
+                orig = active_preds_heads[task_name]
+                aug = active_preds_heads_aug[task_name]
+                consistency += nn.functional.mse_loss(orig, aug)
+            loss += 0.5 * loss_aug + 0.5 * consistency
+
+        # Update metrics
+        for i, (task_name, task_info) in enumerate(self.tasks.items()):
+            pred = active_preds_heads[task_name].detach().cpu()
+            target = y_true[i].detach().cpu()
+            mask = y_true_masks[i].detach().cpu()
+            self.train_metrics.update(task_name, pred, target, mask)
+
+        # Log metrics
+        self.log('train_loss', loss, prog_bar=True, logger=True, on_step=True, on_epoch=False, batch_size=self.config['batch_size'])
 
         return loss
 
 
     def on_train_epoch_end(self):
         # training_step -> validation_step -> on_valid_epoch_end -> on_train_epoch_end
-        pred_tasks = [torch.cat([batch[task_ind] for batch in self.train_preds], dim=0) for task_ind in range(len(self.tasks))]
-        target_tasks = [torch.cat([batch[task_ind] for batch in self.train_targets], dim=0) for task_ind in range(len(self.tasks))]
-        mask_tasks = [torch.cat([batch[task_ind] for batch in self.train_masks], dim=0) for task_ind in range(len(self.tasks))]
-
-        for task_ind, (task_name, task_info) in enumerate(self.tasks.items()):
-            masks = mask_tasks[task_ind] # Shape (N,)
-            preds = pred_tasks[task_ind][masks] # Shape (M,) where M <= N
-            targets = target_tasks[task_ind][masks] # Shape (M,) where M <= N
-
-            if task_name == 'sentiment':
-                metrics = calculate_sentiment(preds, targets)
-            elif task_name == 'sentiment_class':
-                metrics = calculate_sentiment_class(preds, targets)
-            else:
-                raise ValueError(f"Unknown task: {task_name}")
-
+        # Log metrics for training
+        train_metrics = self.train_metrics.compute()
+        
+        for task_name, metrics in train_metrics.items():
+            task_info = self.tasks[task_name]
             for metric_name, metric_value in metrics.items():
-                self.history.update(phase="train", task=task_name, metric=metric_name, value=metric_value, epoch=self.current_epoch)
-
-                if metric_name in task_info['metrics']:
-                    self.log(f'train_{task_name}_{metric_name}', metric_value, prog_bar=False, logger=True, on_epoch=True)
+                # Update history for plotting
+                self.history.update(
+                    phase="train", 
+                    task=task_name, 
+                    metric=metric_name, 
+                    value=metric_value.item(), 
+                    epoch=self.current_epoch
+                )
+                
+                # Log to logger if in the task's metrics list
+                if metric_name in task_info.get('metrics', []):
+                    self.log(
+                        f'train_{task_name}_{metric_name}', 
+                        metric_value,
+                        prog_bar=True,
+                        logger=True,
+                        on_epoch=True,
+                        batch_size=self.config['batch_size']
+                    )
+                    
+                    # Plot metrics
                     self.history.plot(task_name, metric_name)
 
-            if task_name == 'sentiment_class':
-                self.history.plot_ncm('valid', task_name, 'F1', task_info['num_classes'])
-                self.history.plot_ncm('train', task_name, 'F1', task_info['num_classes'])
-
-        avg_loss = self.trainer.logged_metrics['train_loss']
-        self.history.update(phase="train", task="all", metric="avg_loss", value=avg_loss.item(), epoch=self.current_epoch)
-        self.log('train_loss', avg_loss.item(), prog_bar=True, logger=True, on_epoch=True, batch_size=self.config['batch_size'])
-        self.history.plot('all', 'avg_loss')
+        # Log average training loss
+        if 'train_loss' in self.trainer.logged_metrics:
+            avg_loss = self.trainer.logged_metrics['train_loss']
+            self.history.update(
+                phase="train", 
+                task="all", 
+                metric="avg_loss", 
+                value=avg_loss.item(), 
+                epoch=self.current_epoch
+            )
+            self.log('train_loss', avg_loss, prog_bar=True, logger=True, on_epoch=True, batch_size=self.config['batch_size'])
+            self.history.plot('all', 'avg_loss')
+        
+        # Save history and record epoch time
+        self.history.record_epoch_time()
         self.history.save()
 
-        self.train_preds = []
-        self.train_targets = []
-        self.train_masks = []
+        if self.awl is not None:
+            print('awl weights:', [round(float(elem), 2) for elem in self.awl.params])
 
 
     def validation_step(self, batch, batch_idx):
-        x = [batch[feature_name] for feature_name in self.config['feature_list']] # list of shapes [(B, T, F), ...]
-        x_masks = [batch[f'{feature_name}_mask'] for feature_name in self.config['feature_list']] # list of shapes [(B, T), ...]
-        y = [batch[task] for task in self.tasks] # list of shapes [(B,) or (B,T), ...]
-        y_masks = [batch[f'{task}_mask'] for task in self.tasks] # list of shapes [(B, T), ...]
+        x = [batch[feature_name] for feature_name in self.config['feature_list']]
+        x_masks = [batch[f'{feature_name}_mask'] for feature_name in self.config['feature_list']]
+        y_true = [batch[task] for task in self.tasks]
+        y_true_masks = [batch[f'{task}_mask'] for task in self.tasks]
 
-        preds_heads = self(x, x_masks) # list of output heads. sentiment: (B, 1), sentiment_class: (B, 3)
-        loss = multitarget_loss(preds_heads, y, y_masks, self.tasks)
-        
-        if self.consistency_rules:
-            loss += consistency_loss(preds_heads, self.tasks, self.consistency_rules)
+        # Forward pass
+        preds_heads = self(x, x_masks)
+        active_preds_heads = {task_name: preds_heads[task_name] for task_name in self.tasks}
 
+        # Compute loss
+        loss = multitarget_loss(active_preds_heads, y_true, y_true_masks, self.tasks, awl=self.awl)
+
+        # Update metrics
+        for i, (task_name, task_info) in enumerate(self.tasks.items()):
+            pred = active_preds_heads[task_name].detach().cpu()
+            target = y_true[i].detach().cpu()
+            mask = y_true_masks[i].detach().cpu()
+            self.val_metrics.update(task_name, pred, target, mask)
+
+        # Log validation loss
         self.log('valid_loss', loss, prog_bar=True, logger=True, on_epoch=True, batch_size=self.config['batch_size'])
-        self.valid_preds.append(preds_heads)
-        self.valid_targets.append(y)
-        self.valid_masks.append(y_masks)
 
         return loss
 
 
     def on_validation_epoch_end(self):
-        preds_tasks = [torch.cat([batch[task_ind] for batch in self.valid_preds], dim=0) for task_ind in range(len(self.tasks))]
-        targets_tasks = [torch.cat([batch[task_ind] for batch in self.valid_targets], dim=0) for task_ind in range(len(self.tasks))]
-        masks_tasks = [torch.cat([batch[task_ind] for batch in self.valid_masks], dim=0) for task_ind in range(len(self.tasks))]
+        # Compute metrics for validation
+        val_metrics = self.val_metrics.compute()
 
-        for task_ind, (task_name, task_info) in enumerate(self.tasks.items()):
-            masks = masks_tasks[task_ind] # Shape (N,)
-            preds = preds_tasks[task_ind][masks] # Shape (M,) where M <= N
-            targets = targets_tasks[task_ind][masks] # Shape (M,) where M <= N
+        values = []
+        for i, (task_name, metric_dict) in enumerate(val_metrics.items()):
+            if task_name == 'emotion_class':
+                values.append(metric_dict['F1'].item())
+            elif task_name == 'emotion_class_fw':
+                values.append(metric_dict['F1'].item())
+            elif task_name == 'emotion_intensity':
+                values.append(metric_dict['F1'].item())
+            elif task_name == 'sentiment':
+                values.append(metric_dict['MAE'].item())  # lower better, maybe rescale
+            elif task_name == 'valence':
+                values.append(metric_dict['CCC'].item())
+            elif task_name == 'arousal':
+                values.append(metric_dict['CCC'].item())
 
-            if task_name == 'sentiment':
-                metrics = calculate_sentiment(preds, targets)
-            elif task_name == 'sentiment_class':
-                metrics = calculate_sentiment_class(preds, targets)
-            else:
-                raise ValueError(f"Unknown task: {task_name}")
+        composite_score = float(np.mean(values))
 
+        self.log("valid_combined_score", composite_score, prog_bar=True, logger=True, on_epoch=True)
+        self.history.update(
+            phase="valid", 
+            task="all", 
+            metric="combined_score", 
+            value=composite_score, 
+            epoch=self.current_epoch
+        )
+        self.history.plot("all", "combined_score")
+
+        for task_name, metrics in val_metrics.items():
+            task_info = self.tasks[task_name]
             for metric_name, metric_value in metrics.items():
-                self.history.update(phase="valid", task=task_name, metric=metric_name, value=metric_value, epoch=self.current_epoch)
+                # Update history for plotting
+                self.history.update(
+                    phase="valid", 
+                    task=task_name, 
+                    metric=metric_name, 
+                    value=metric_value.item(), 
+                    epoch=self.current_epoch
+                )
 
-                if metric_name in task_info['metrics']:
-                    self.log(f'valid_{task_name}_{metric_name}', metric_value, prog_bar=True, logger=True, on_epoch=True, batch_size=self.config['batch_size'])
+                # Log to logger if in the task's metrics list
+                if metric_name in task_info.get('metrics', []):
+                    self.log(
+                        f'valid_{task_name}_{metric_name}', 
+                        metric_value,
+                        prog_bar=True,
+                        logger=True,
+                        on_epoch=True,
+                        batch_size=self.config['batch_size']
+                    )
 
-        avg_loss = self.trainer.logged_metrics['valid_loss']
-        self.history.update(phase="valid", task="all", metric="avg_loss", value=avg_loss.item(), epoch=self.current_epoch)
-        self.log('valid_loss', avg_loss.item(), prog_bar=True, logger=True, on_epoch=True, batch_size=self.config['batch_size'])
+                    # Plot metrics
+                    self.history.plot(task_name, metric_name)
 
-        self.valid_preds = []
-        self.valid_targets = []
-        self.valid_masks = []
+        # Log average validation loss
+        if 'valid_loss' in self.trainer.logged_metrics:
+            avg_loss = self.trainer.logged_metrics['valid_loss']
+            self.history.update(
+                phase="valid", 
+                task="all", 
+                metric="avg_loss", 
+                value=avg_loss.item(), 
+                epoch=self.current_epoch
+            )
+            self.history.plot('all', 'avg_loss')
+        
+        # Save history
+        self.history.save()
 
 
     def test_step(self, batch, batch_idx):
-        x = [batch[feature_name] for feature_name in self.config['feature_list']] # list of shapes [(B, T, F), ...]
-        x_masks = [batch[f'{feature_name}_mask'] for feature_name in self.config['feature_list']] # list of shapes [(B, T), ...]
+        # Skip test step in pretraining phase
+        if self.stage == 'tmm_pretraining':
+            return None
 
-        preds_heads = self(x, x_masks) # list of heads
+        # Prepare inputs and targets
+        x = [batch[feature_name] for feature_name in self.config['feature_list']]  # # list of shapes [(B, T, F), ...]
+        x_masks = [batch[f'{feature_name}_mask'] for feature_name in self.config['feature_list']]  # # list of shapes [(B, T), ...]
+        y_true = [batch[task] for task in self.tasks]  # list of shapes [(B, T, F), ...] or [(B, F), ...]
+        y_true_masks = [batch[f'{task}_mask'] for task in self.tasks]  # list of shapes [(B, T), ...] or [(B, F), ...]
 
-        y = [batch[task] for task in self.tasks] # list of shapes [(B,) or (B, T), ...]
-        y_masks = [batch[f'{task}_mask'] for task in self.tasks] # list of shapes [(B,) or (B, T), ...]
- 
-        self.test_preds.append(preds_heads)
-        self.test_targets.append(y)
-        self.test_masks.append(y_masks)
+        # Forward pass
+        preds_heads = self(x, x_masks)
+        active_preds_heads = {task_name: preds_heads[task_name] for task_name in self.tasks}
 
-        self.test_info.append(list(zip(batch['dataset'], batch['__key__']))) # list of (dataset, sample_key) pairs
+        # Update metrics and store predictions for each task
+        for i, (task_name, task_info) in enumerate(self.tasks.items()):
+            pred = active_preds_heads[task_name].detach().cpu()
+            target = y_true[i].detach().cpu()
+            mask = y_true_masks[i].detach().cpu()
+            self.test_metrics.update(task_name, pred, target, mask)
+
+            # skip tmm task predictions
+            if task_name in ['tmm_wavlm_baseplus', 'tmm_clip', 'tmm_xml_roberta']: continue
+
+            # Store predictions and targets
+            batch_info = {
+                'pred': pred,
+                'target': target,
+                'mask': mask,
+                'task': task_name,
+                'dataset': batch['dataset'],
+                'key': batch['__key__']
+            }
+            self.test_benchmark.append(batch_info)
 
 
     def on_test_epoch_end(self):
-        pred_tasks = [torch.cat([batch[task_ind] for batch in self.test_preds], dim=0) for task_ind in range(len(self.tasks))]
-        target_tasks = [torch.cat([batch[task_ind] for batch in self.test_targets], dim=0) for task_ind in range(len(self.tasks))]
-        mask_tasks = [torch.cat([batch[task_ind] for batch in self.test_masks], dim=0) for task_ind in range(len(self.tasks))]
-        info = [item for sublist in self.test_info for item in sublist]
+        # Skip test epoch end in pretraining phase
+        if self.stage == 'tmm_pretraining':
+            return
 
-        # Calculate metrics for each task
-        for task_ind, (task_name, task_info) in enumerate(self.tasks.items()):
-            masks = mask_tasks[task_ind] # Shape (N,)
-            preds = pred_tasks[task_ind][masks] # Shape (M,) where M <= N
-            targets = target_tasks[task_ind][masks] # Shape (M,) where M <= N
-
-            if task_name == 'sentiment':
-                metrics = calculate_sentiment(preds, targets)
-            elif task_name == 'sentiment_class':
-                metrics = calculate_sentiment_class(preds, targets)
-            else:
-                raise ValueError(f"Unknown task: {task_name}")
-
+        # Compute test metrics
+        test_metrics = self.test_metrics.compute()
+        
+        for task_name, metrics in test_metrics.items():
+            task_info = self.tasks[task_name]
             for metric_name, metric_value in metrics.items():
-                self.history.update(phase="test", task=task_name, metric=metric_name, value=metric_value, epoch=self.current_epoch)
+                # Update history for plotting
+                self.history.update(
+                    phase="test",
+                    task=task_name,
+                    metric=metric_name,
+                    value=metric_value.item(),
+                    epoch=self.current_epoch
+                )
+                
+                # Log to logger if this is a tracked metric for this task
+                if metric_name in task_info.get('metrics', []):
+                    self.log(
+                        f'test_{task_name}_{metric_name}',
+                        metric_value,
+                        prog_bar=True,
+                        logger=True,
+                        on_epoch=True,
+                        batch_size=self.config['batch_size']
+                    )
 
-                if metric_name in task_info['metrics']:
-                    self.log(f'test_{task_name}_{metric_name}', metric_value, prog_bar=True, logger=True, on_epoch=True, batch_size=self.config['batch_size'])
+        # Save test history
+        self.history.save_test()
+        
+        # Process and save predictions
+        predictions = self._process_predictions(self.test_benchmark)
+        self.save_predictions(predictions)
+        
+        # Clean up
+        self.test_benchmark = []
+
+
+    def _process_predictions(self, test_benchmark):
+        """Process test predictions and return organized predictions by dataset and task.
+        
+        Args:
+            test_benchmark: List of dictionaries containing prediction data
+            
+        Returns:
+            Dictionary containing organized predictions by dataset and task
+        """
+        task_batches = {}
+        for batch_info in test_benchmark:
+            task_name = batch_info['task']
+            if task_name not in task_batches:
+                task_batches[task_name] = []
+            task_batches[task_name].append(batch_info)
 
         dataset_predictions = {}
-        # Save predictions and targets for each sample
-        for task_ind, (task_name, task_info) in enumerate(self.tasks.items()):
-            preds = pred_tasks[task_ind] # Shape (M,) or (M, T) or (M, T, C)
-            targets = target_tasks[task_ind] # Shape (M,) or (M, T)
-            masks = mask_tasks[task_ind] # Shape (N,) or (N, T)
+        for task_name, batch_info_list in task_batches.items():
+            if task_name not in self.tasks: continue
 
-            for sample_ind, (dataset, sample_key) in enumerate(info):
-                # Handle different mask types based on task
-                if task_name in ['sentiment', 'sentiment_class', 'emotion_class', 'intensity']:
-                    # Scalar mask (B,)
-                    if not masks[sample_ind]:
-                        continue  # Skip if sample is masked
-                else:  # valence, arousal, emotion_class_fw
-                    # Frame-wise mask (B, T)
-                    if not masks[sample_ind].any():
-                        continue  # Skip if all frames are masked
+            for batch_info in batch_info_list:
+                for i in range(len(batch_info['key'])):
+                    dataset = batch_info['dataset'][i]
+                    sample_key = batch_info['key'][i]
 
-                # Initialize dataset and task dictionaries if they don't exist
-                if dataset not in dataset_predictions:
-                    dataset_predictions[dataset] = {}
-                if task_name not in dataset_predictions[dataset]:
-                    dataset_predictions[dataset][task_name] = {}
-                if sample_key not in dataset_predictions[dataset][task_name]:
-                    dataset_predictions[dataset][task_name][sample_key] = {}
-                
-                # Convert predictions and targets to Python types for JSON serialization
-                if task_name == 'sentiment': # save the value
-                    pred_value = float(preds[sample_ind].item())
-                    target_value = float(targets[sample_ind].item())
-                elif task_name in ['sentiment_class', 'emotion_class', 'intensity']: # save all logits
-                    pred_value = [float(x) for x in preds[sample_ind].tolist()]
-                    target_value = int(targets[sample_ind].item())
-                elif task_name in ['valence', 'arousal', 'emotion_class_fw']: # frame-wise prediction for a single sample is (T, 1) or (T, C)
-                    # Get frame-wise predictions and targets
-                    if task_name in ['valence', 'arousal']:
-                        # For valence/arousal, shape is (T, 1)
-                        pred_frames = preds[sample_ind].squeeze(-1)  # (T,)
-                        target_frames = targets[sample_ind].squeeze(-1)  # (T,)
-                        frame_masks = masks[sample_ind]  # (T,)
-                        
-                        # Create frame-wise entries only for valid frames
-                        pred_value = {}
-                        target_value = {}
-                        for frame_id in range(len(pred_frames)):
-                            if frame_masks[frame_id]:
-                                pred_value[str(frame_id)] = float(pred_frames[frame_id].item())
-                                target_value[str(frame_id)] = float(target_frames[frame_id].item())
-                                
-                    elif task_name == 'emotion_class_fw':
-                            # For emotion_class_fw, shape is (T, C)
-                            pred_frames = preds[sample_ind]  # (T, C)
-                            target_frames = targets[sample_ind]  # (T,)
-                            frame_masks = masks[sample_ind]  # (T,)
-                            
-                            # Create frame-wise entries with logits only for valid frames
-                            pred_value = {}
-                            target_value = {}
-                            for frame_id in range(len(pred_frames)):
-                                if frame_masks[frame_id]:
-                                    pred_value[str(frame_id)] = [float(x) for x in pred_frames[frame_id].tolist()]
-                                    target_value[str(frame_id)] = int(target_frames[frame_id].item())
-                    else:
-                        raise ValueError(f"Unknown task: {task_name}")
+                    if dataset not in dataset_predictions:
+                        dataset_predictions[dataset] = {}
+                    if task_name not in dataset_predictions[dataset]:
+                        dataset_predictions[dataset][task_name] = {}
 
-                dataset_predictions[dataset][task_name][sample_key] = {
-                    'y_pred': pred_value,
-                    'y_true': target_value
-                }
+                    pred_value, target_value, mask_value = self.convert_to_appropriate_format(task_name, batch_info['pred'][i], batch_info['target'][i], batch_info['mask'][i])
 
-        # Save predictions for each dataset
-        predictions_dir = Path(self.config['experiment_dir']) / 'predictions'
-        predictions_dir.mkdir(exist_ok=True)
-        
-        for dataset, predictions in dataset_predictions.items():
-            output_path = predictions_dir / f'test_{dataset.lower()}.json'
-            with open(output_path, 'w') as f:
-                json.dump(predictions, f, indent=2)
+                    dataset_predictions[dataset][task_name][sample_key] = {
+                        'y_pred': pred_value,
+                        'y_true': target_value,
+                        'mask': mask_value
+                    }
+
+        return dataset_predictions
+    
+
+    def convert_to_appropriate_format(self, task_name, pred, target, mask):
+
+        if task_name == 'sentiment':
+            # Scalar regression () -> float
+            pred_value = float(pred.item())
+            target_value = float(target.item())
+            mask_value = bool(mask.item())
             
-            if task_name == 'sentiment_class':
-                self.history.plot_ncm('test', task_name, 'F1', task_info['num_classes'])
+        elif task_name in ['sentiment_class', 'emotion_class', 'emotion_intensity']:
+            # Classification (C,) -> list of logits and class index
+            pred_value = [float(x) for x in pred.tolist()]
+            target_value = int(target.item())
+            mask_value = bool(mask.item())
+            
+        elif task_name in ['valence', 'arousal']:
+            # Sequence regression (T,) -> dict of frame_id: float
+            pred_frames = pred.squeeze(-1)
+            target_frames = target.squeeze(-1)
+            
+            pred_value = {}
+            target_value = {}
+            mask_value = {}
 
-        self.history.save_test()
+            for frame_id in range(len(pred_frames)):
+                pred_value[str(frame_id)] = float(pred_frames[frame_id].item())
+                target_value[str(frame_id)] = float(target_frames[frame_id].item())
+                mask_value[str(frame_id)] = bool(mask[frame_id].item())
+            
+        elif task_name == 'emotion_class_fw':
+            # Sequence classification (T, C) -> dict of frame_id: list of logits and class index
+            pred_value = {}
+            target_value = {}
+            mask_value = {}
+            
+            for frame_id in range(len(pred)):
+                pred_value[str(frame_id)] = [float(x) for x in pred[frame_id].tolist()]
+                target_value[str(frame_id)] = int(target[frame_id].item())
+                mask_value[str(frame_id)] = bool(mask[frame_id].item())
+        
+        else:
+            raise ValueError(f'Unknown task: {task_name}')
+        
+        return pred_value, target_value, mask_value
 
-        self.test_preds = []
-        self.test_targets = []
-        self.test_masks = []
-        self.test_info = []
+
+    def save_predictions(self, predictions):
+        """Save predictions to JSON files organized by dataset.
+        
+        Args:
+            predictions: Dictionary containing organized predictions by dataset and task
+        """
+        if 'model_stage2_cp_path' not in self.config:
+            output_dir = Path(self.config['experiment_dir']) / 'predictions' / 'auto'
+        else:
+            output_dir = Path(self.config['experiment_dir']) / 'predictions' / Path(self.config['model_stage2_cp_path']).stem
+        output_dir.mkdir(exist_ok=True, parents=True)
+        
+        for dataset, tasks in predictions.items():
+            output_path = output_dir / f'test_{dataset.lower()}.json'
+            with open(output_path, 'w') as f:
+                json.dump(tasks, f, indent=2)
+        
+        print(f"Predictions saved to {output_dir}")
 
 
     def configure_optimizers(self):
@@ -305,21 +451,42 @@ class ModelWrapper(L.LightningModule):
         weight_decay = float(optimizer_config.get('weight_decay', 0))
 
         # Configure optimizer
+        if self.config.get('awl', False):
+            parameters = [
+                {'params': self.model.parameters()},
+                {'params': self.awl.parameters(), 'lr': self.config.get('awl', {}).get('lr', 0.01)}
+            ]
+            if self.config.get('lembda_augmentor', False):
+                parameters += [
+                    {'params': self.augmentors.parameters()}
+                ]
+        else:
+            parameters = self.model.parameters()
+            if self.config.get('lembda_augmentor', False):
+                parameters += self.augmentors.parameters()
+
         if optimizer_name == 'radam':
             optimizer = torch.optim.RAdam(
-                self.parameters(),
+                parameters,
                 lr=base_lr,
                 weight_decay=weight_decay,
                 decoupled_weight_decay=optimizer_config.get('decoupled_weight_decay', False)
             )
         elif optimizer_name == 'adamw':
             optimizer = torch.optim.AdamW(
-                self.parameters(),
+                parameters,
+                lr=base_lr,
+                weight_decay=weight_decay
+            )
+        elif optimizer_name == 'adams':
+            from emotionlinmult.train.optim import AdamS
+            optimizer = AdamS(
+                parameters,
                 lr=base_lr,
                 weight_decay=weight_decay
             )
         else:
-            optimizer = torch.optim.Adam(self.parameters(), lr=base_lr)
+            optimizer = torch.optim.Adam(parameters, lr=base_lr)
 
         # Configure learning rate scheduler
         lr_scheduler_config = self.config.get('lr_scheduler', {})
@@ -327,13 +494,13 @@ class ModelWrapper(L.LightningModule):
         
 
         # Configure warmup scheduler
-        if config.get('warmup_epochs', 0) > 0:
+        if self.config.get('warmup_epochs', 0) > 0:
             # write a warmup scheduler
             warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
                 optimizer,
                 start_factor=0.1,
                 end_factor=1.0,
-                total_iters=config['warmup_epochs']
+                total_iters=self.config['warmup_epochs']
             )
         else:
             warmup_scheduler = None
@@ -374,16 +541,23 @@ class ModelWrapper(L.LightningModule):
 
         # Main scheduler
         if lr_scheduler_name == 'CosineAnnealingLR':
-            main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.config['n_epochs']-config.get('warmup_epochs', 0))
+            main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.config['n_epochs']-self.config.get('warmup_epochs', 0))
+        elif lr_scheduler_name == 'CosineAnnealingWarmRestarts':
+            main_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                optimizer,
+                T_0=10,
+                T_mult=2,
+                eta_min=1e-7
+            )
         else:
             raise ValueError(f'Given lr scheduler is not supported: {lr_scheduler_name}')
 
         # Combine warmup and main scheduler using SequentialLR
-        if config.get('warmup_epochs', 0) > 0:
+        if self.config.get('warmup_epochs', 0) > 0:
             lr_scheduler = torch.optim.lr_scheduler.SequentialLR(
                 optimizer,
                 schedulers=[warmup_scheduler, main_scheduler],
-                milestones=[config['warmup_epochs']]
+                milestones=[self.config['warmup_epochs']]
             )
         else:
             lr_scheduler = main_scheduler
@@ -399,8 +573,12 @@ def train_model(config: dict):
     torch.set_float32_matmul_precision(config.get('float32_matmul_precision', 'medium')) # medium, high, highest
     experiment_name = config.get('experiment_name', datetime.now().strftime("%Y%m%d-%H%M%S"))
     experiment_dir = Path(config.get('output_dir', 'results')) / experiment_name
-    if experiment_dir.exists() and 'test_only' not in config:
-        raise ValueError(f'Experiment with {experiment_name} already exists.')
+    if experiment_dir.exists() and 'test_only' not in config and not config.get('overwrite', False):
+        raise ValueError(f'Experiment with {experiment_name} already exists at {experiment_dir.resolve()}.')
+    
+    if experiment_dir.exists() and 'test_only' not in config and config.get('overwrite', False):
+        os.system(f'rm -rfd {experiment_dir}')
+
     experiment_dir.mkdir(parents=True, exist_ok=True)
     config['experiment_dir'] = str(experiment_dir)
 
@@ -415,12 +593,19 @@ def train_model(config: dict):
     else:
         raise ValueError(f'Unsupported model name {config["model_name"]}')
 
-    lightning_model = ModelWrapper(model, config=config)
+    if 'model_stage1_cp_path' in config: # single gpu is supported only
+        checkpoint = torch.load(config['model_stage1_cp_path'], weights_only=True, map_location="cpu")
+        state_dict = {k.replace('model.', ''): v for k, v in checkpoint['state_dict'].items()}
+        model.load_state_dict(state_dict)
+        lightning_model = ModelWrapper(model, config=config)
+    else:
+        lightning_model = ModelWrapper(model, config=config)
 
     # Define the callbacks and logger
     callbacks = []
+    checkpoints = []
     for checkpoint_config in config['checkpoints']:
-        callback = L.pytorch.callbacks.ModelCheckpoint(
+        checkpoint = L.pytorch.callbacks.ModelCheckpoint(
             dirpath=experiment_dir / 'checkpoint',
             filename=f"{checkpoint_config['name']}",
             monitor=checkpoint_config['monitor'],
@@ -429,7 +614,9 @@ def train_model(config: dict):
             verbose=True,
             save_weights_only=True
         )
-        callbacks.append(callback)
+        checkpoints.append(checkpoint)
+
+    callbacks += checkpoints
 
     config_es = config.get('early_stopping', False)
     if config_es:
@@ -442,39 +629,48 @@ def train_model(config: dict):
         callbacks.append(early_stopping)
 
     csv_logger = L.pytorch.loggers.CSVLogger(save_dir=str(experiment_dir), name="csv_logs")
+    accumulator = GradientAccumulationScheduler(scheduling={0: 10, 35: 5, 50: 1})
+    callbacks.append(accumulator)
 
     # Define the trainer
     trainer = L.Trainer(
         accelerator=config.get('accelerator', 'gpu'),
         devices=config.get('devices', [0]),
-        max_epochs=config.get('n_epochs', 100),
+        strategy=config.get('strategy', 'auto'),
+        max_epochs=3 if 'dev' in config else config.get('n_epochs', 75),
         callbacks=callbacks,
-        log_every_n_steps=10,
+        log_every_n_steps=1 if 'dev' in config else 10,
         logger=csv_logger,
         num_sanity_val_steps=0,
-        #limit_train_batches=1,
-        #limit_val_batches=1,
-        #limit_test_batches=1,
+        limit_train_batches=3 if 'dev' in config else 1.0,
+        limit_val_batches=3 if 'dev' in config else 1.0,
+        limit_test_batches=3 if 'dev' in config else 1.0,
         gradient_clip_val=1.0
     )
 
     # Train the model
     if 'test_only' not in config:
-        if 'cp_path' in config:
-            trainer.fit(lightning_model, datamodule=data_module, ckpt_path=config['cp_path'])
+        if 'trainer_cp_path' in config:
+            trainer.fit(lightning_model, datamodule=data_module, ckpt_path=config['trainer_cp_path'])
         else:
             trainer.fit(lightning_model, datamodule=data_module)
 
     # Test the model on the test set
+    if config['stage'] == 'tmm_pretraining': return
+
     print("Evaluating on the test set...")
-    if 'cp_path' in config:
-        checkpoint_path = config['cp_path']
+    if 'model_stage2_cp_path' in config:
+        checkpoint_path = config['model_stage2_cp_path']
         print(f"Loading model from: {checkpoint_path}")
     else:
-        checkpoint_path = callbacks[1].best_model_path # checkpoint_valid_mae
+        checkpoint_path = checkpoints[config.get('checkpoints_auto_index', 1)].best_model_path
         print(f"Loading best model from: {checkpoint_path}")
 
-    lightning_model = ModelWrapper.load_from_checkpoint(model=model, checkpoint_path=checkpoint_path, map_location=torch.device(f'cuda:{config.get("gpu_id", 0)}'))
+    checkpoint = torch.load(checkpoint_path, weights_only=True, map_location=torch.device(f'cuda:{config.get("devices", [0])[0]}'))
+    state_dict = {k.replace('model.', ''): v for k, v in checkpoint['state_dict'].items() if 'awl' not in k}
+    state_dict = {k: v for k, v in state_dict.items() if 'augmentors' not in k}
+    model.load_state_dict(state_dict)
+    lightning_model = ModelWrapper(model, config=config)
     test_results = trainer.test(lightning_model, datamodule=data_module)
 
 

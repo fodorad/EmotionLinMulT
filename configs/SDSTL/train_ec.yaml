@@ -1,0 +1,42 @@
+# experiment
+output_dir: results/SD/stage2
+seed: 42
+
+accelerator: gpu
+devices:
+  - 1
+float32_matmul_precision: medium # high, highest
+
+tasks:
+  emotion_class: # 0 neutral, 1 happy, 2 surprise, 3 sad, 4 angry, 5 fear, 6 disgust, 7 contempt
+    loss_fn: cross_entropy
+    num_classes: 8
+    metrics:
+      - F1
+      - P
+      - R
+      - ACC
+
+n_epochs: 75
+warmup_epochs: 5
+
+optimizer:
+  name: adam
+  base_lr: 0.001
+
+#awl:
+#  lr: 0.01
+
+lr_scheduler:
+  name: CosineAnnealingWarmRestarts
+
+checkpoints:
+  - name: checkpoint_valid_loss
+    monitor: valid_loss
+    mode: min
+  - name: checkpoint_valid_emotion_class_F1
+    monitor: valid_emotion_class_F1
+    mode: max
+
+stage: finetuning
+# trainer_cp_path: ... # to load trainer and optimizer states as well

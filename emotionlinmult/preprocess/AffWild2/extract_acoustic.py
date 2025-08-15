@@ -6,10 +6,7 @@ from tqdm import tqdm
 from pathlib import Path
 from exordium.audio.io import video2audio
 from exordium.audio.wavlm import WavlmWrapper
-
-
-DB = Path('data/db/Aff-Wild2')
-DB_PROCESSED = Path('data/db_processed/Aff-Wild2')
+from emotionlinmult.preprocess.AffWild2 import DB, DB_PROCESSED
 
 
 def convert(video_path: Path):

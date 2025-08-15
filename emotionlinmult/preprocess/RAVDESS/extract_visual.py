@@ -1,14 +1,9 @@
-import os
 import argparse
 import random
-import time
 from tqdm import tqdm
 from pathlib import Path
 from exordium.video.clip import ClipWrapper
-
-
-DB = Path('data/db/RAVDESS')
-DB_PROCESSED = Path('data/db_processed/RAVDESS')
+from emotionlinmult.preprocess.RAVDESS import DB, DB_PROCESSED
 
 
 if __name__ == "__main__":
@@ -20,8 +15,8 @@ if __name__ == "__main__":
 
     video_paths = sorted(
         [elem for elem in list(DB.glob('**/*.mp4')) \
-            if int(elem.stem.split("-")[0]) != 3 and \
-               int(elem.stem.split("-")[1]) != 2] # audio-only samples and songs are excluded
+            if int(elem.stem.split("-")[0]) == 1 and \
+               int(elem.stem.split("-")[1]) == 1] # 0: AV; 1: speech;
     )[args.start:args.end]
     random.shuffle(video_paths)
     print(f"Processing {len(video_paths)} videos ({args.start}-{args.end})...")

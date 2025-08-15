@@ -6,23 +6,13 @@ import numpy as np
 import pickle
 from sklearn.model_selection import train_test_split
 from exordium.utils.padding import pad_or_crop_time_dim
-
-
-DB = Path("data/db/Aff-Wild2")
-DB_PROCESSED = Path("data/db_processed/Aff-Wild2")
-
-class OriginalAffWild2EmotionClass(Enum):
-    NEUTRAL = 0
-    ANGER = 1
-    DISGUST = 2
-    FEAR = 3
-    HAPPINESS = 4
-    SADNESS = 5
-    SURPRISE = 6
-    OTHER = 7
-
-EMOTION_TO_CLASS = {e.name.lower(): e.value for e in OriginalAffWild2EmotionClass}
-CLASS_TO_EMOTION = {e.value: e.name.lower() for e in OriginalAffWild2EmotionClass}
+from emotionlinmult.preprocess import (
+    CLIP_TIME_DIM,
+    WAVLM_BASEPLUS_TIME_DIM,
+    CLIP_FEATURE_DIM,
+    WAVLM_BASEPLUS_FEATURE_DIM,
+)
+from emotionlinmult.preprocess.AffWild2 import DB, DB_PROCESSED
 
 
 def get_annotation(file_path: str | Path):
@@ -32,7 +22,9 @@ def get_annotation(file_path: str | Path):
         annotations = {}
         for idx, value in enumerate(lines[1:]):
             frame_id = f"{idx:06d}"
-            annotations[frame_id] = int(value)
+            expr_value = int(value)
+            if expr_value == 7: expr_value = -1 # skip OTHER
+            annotations[frame_id] = expr_value
         return annotations
 
     with open(str(file_path), 'r') as f:
@@ -41,7 +33,7 @@ def get_annotation(file_path: str | Path):
     return _parse_expr(lines)
 
 
-def save_webdataset(subset: str, features: list[str], output_dir: Path, analysis_window_sec: int = 10):
+def save_webdataset(subset: str, features: list[str], output_dir: Path):
     """Aff-Wild2 EXPR WebDataset"""
 
     annotation_dir = DB / '6th_ABAW_Annotations' / 'EXPR_Recognition_Challenge'
@@ -58,11 +50,6 @@ def save_webdataset(subset: str, features: list[str], output_dir: Path, analysis
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    fps = 30
-    sr = 50
-    clip_time_dim = analysis_window_sec * fps  # 10 sec @ 30 fps
-    wavlm_baseplus_time_dim = analysis_window_sec * sr  # 10 sec @ ~50 sr
-
     with wds.ShardWriter(str(output_dir / f"affwild2_expr_{subset}_%06d.tar"), maxcount=1000) as sink:
         for sample_path in tqdm(sample_paths, total=len(sample_paths), desc=f"Aff-Wild2 EXPR {subset}"):
             sample_id = sample_path.stem
@@ -71,7 +58,7 @@ def save_webdataset(subset: str, features: list[str], output_dir: Path, analysis
 
             # Load video features
             clip_path = DB_PROCESSED / 'clip' / f'{sample_id}.npy'
-            clip_full = np.load(clip_path) if clip_path.exists() else None  # (T_vid, F)
+            clip_full = np.load(clip_path)  # (T_vid, F)
 
             # Load audio features
             wavlm_path = DB_PROCESSED / 'wavlm_baseplus' / f'{sample_id}.pkl'
@@ -82,40 +69,41 @@ def save_webdataset(subset: str, features: list[str], output_dir: Path, analysis
             else:
                 wavlm_full = None
 
-            if clip_full is None and wavlm_full is None:
-                raise ValueError(f"No features found for {sample_id}.")
-
-            num_chunks = int(np.ceil(annotation.shape[0] / clip_time_dim))
+            num_chunks = int(np.ceil(annotation.shape[0] / CLIP_TIME_DIM))
             if num_chunks == 0:
                 raise ValueError(f"No annotation for {sample_id}.")
 
             for chunk_idx in range(num_chunks):
-                chunk_key = f"{sample_id}_{chunk_idx:03d}"
+                chunk_key = f"{sample_id}_{chunk_idx:05d}"
+
+                # Process labels
+                start = chunk_idx * CLIP_TIME_DIM # frame-wise, similarly to clip
+                end = start + CLIP_TIME_DIM
+                labels_chunk = annotation[start:end]
+                labels, labels_mask = pad_or_crop_time_dim(labels_chunk, CLIP_TIME_DIM)
+                labels_mask[labels == -1] = False # filter invalid labels
+                if labels_mask.sum() == 0: continue # skip empty chunks
 
                 # Process video features
-                if clip_full is not None:
-                    start = chunk_idx * clip_time_dim
-                    end = start + clip_time_dim
-                    clip_chunk = clip_full[start:end]
-                    clip, clip_mask = pad_or_crop_time_dim(clip_chunk, clip_time_dim)
-                else:
-                    clip = np.zeros((clip_time_dim, 1024), np.float32)
-                    clip_mask = np.zeros(clip_time_dim, bool)
+                start = chunk_idx * CLIP_TIME_DIM
+                end = start + CLIP_TIME_DIM
+                clip_chunk = clip_full[start:end]
+                clip, clip_mask = pad_or_crop_time_dim(clip_chunk, CLIP_TIME_DIM)
 
                 # Process audio features
                 if wavlm_full is not None:
-                    start = chunk_idx * wavlm_baseplus_time_dim
-                    end = start + wavlm_baseplus_time_dim
+                    start = chunk_idx * WAVLM_BASEPLUS_TIME_DIM
+                    end = start + WAVLM_BASEPLUS_TIME_DIM
                     wavlm_chunk = wavlm_full[start:end]
-                    wavlm, wavlm_mask = pad_or_crop_time_dim(wavlm_chunk, wavlm_baseplus_time_dim)
+                    wavlm, wavlm_mask = pad_or_crop_time_dim(wavlm_chunk, WAVLM_BASEPLUS_TIME_DIM)
                 else:
-                    wavlm = np.zeros((wavlm_baseplus_time_dim, 768), np.float32)
-                    wavlm_mask = np.zeros(wavlm_baseplus_time_dim, bool)
+                    wavlm = np.zeros((WAVLM_BASEPLUS_TIME_DIM, WAVLM_BASEPLUS_FEATURE_DIM), np.float32)
+                    wavlm_mask = np.zeros(WAVLM_BASEPLUS_TIME_DIM, bool)
 
                 # Verify feature dimensions
-                assert wavlm.ndim == 2 and wavlm.shape[1] == 768, \
+                assert wavlm.shape == (WAVLM_BASEPLUS_TIME_DIM, WAVLM_BASEPLUS_FEATURE_DIM), \
                     f"Invalid WavLM shape: {wavlm.shape}"
-                assert clip.ndim == 2 and clip.shape[1] == 1024, \
+                assert clip.shape == (CLIP_TIME_DIM, CLIP_FEATURE_DIM), \
                     f"Invalid CLIP shape: {clip.shape}"
 
                 # Build feature dictionary
@@ -123,19 +111,8 @@ def save_webdataset(subset: str, features: list[str], output_dir: Path, analysis
                     'clip': clip,
                     'clip_mask': clip_mask,
                     'wavlm_baseplus': wavlm,
-                    'wavlm_baseplus_mask': wavlm_mask,
-                    #'xml_roberta': xml_roberta, # maybe later with whisper
-                    #'xml_roberta_mask': np.ones(xml_roberta.shape[0], bool), # maybe later with whisper
+                    'wavlm_baseplus_mask': wavlm_mask
                 }
-
-                # Process labels
-                start = chunk_idx * clip_time_dim # frame-wise, similarly to clip
-                end = start + clip_time_dim
-                labels_chunk = annotation[start:end]
-                labels, labels_mask = pad_or_crop_time_dim(labels_chunk, clip_time_dim)
-                labels_mask[labels == -1] = False # filter invalid labels
-
-                if labels_mask.sum() == 0: continue # skip empty chunks
 
                 # Create sample
                 sample = {
@@ -154,4 +131,4 @@ def save_webdataset(subset: str, features: list[str], output_dir: Path, analysis
 if __name__ == "__main__":
     output_dir = DB_PROCESSED / "webdataset_expr"
     for subset in ['train', 'valid', 'test']:
-        save_webdataset(subset, ['clip', 'wavlm_baseplus'], output_dir)
+        save_webdataset(subset=subset, features=['clip', 'wavlm_baseplus'], output_dir=output_dir)

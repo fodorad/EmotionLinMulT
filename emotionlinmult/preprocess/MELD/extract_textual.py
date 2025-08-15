@@ -3,32 +3,10 @@ from tqdm import tqdm
 import pandas as pd
 import pickle
 from exordium.text.xml_roberta import XmlRobertaWrapper
-
-
-DB = Path("data/db/MELD")
-DB_PROCESSED = Path("data/db_processed/MELD")
-
-ANNOTATION_PATHS = {
-    'train': DB / 'train_sent_emo.csv',
-    'valid': DB / 'dev_sent_emo.csv',
-    'test': DB / 'test_sent_emo.csv'
-}
-
-SENTIMENT_TO_CLASS = {
-    'neutral': 0,
-    'positive': 1,
-    'negative': 2,
-}
-
-EMOTION_TO_CLASS = {
-    'neutral': 0,
-    'joy': 1,
-    'sadness': 2,
-    'anger': 3,
-    'surprise': 4,
-    'fear': 5,
-    'disgust': 6,
-}
+from emotionlinmult.preprocess import (
+    MELD_SENTIMENT_NAME2ORIG, MELD_EMOTION_NAME2ORIG, XML_ROBERTA_FEATURE_DIM
+)
+from emotionlinmult.preprocess.MELD import DB_PROCESSED, ANNOTATION_PATHS
 
 
 def get_annotation(csv_path: str):
@@ -38,8 +16,8 @@ def get_annotation(csv_path: str):
     for _, row in df.iterrows():
         sample_id = f"dia{row['Dialogue_ID']}_utt{row['Utterance_ID']}"
         entry = {
-            'sentiment': SENTIMENT_TO_CLASS[row['Sentiment'].strip().lower()], # sentiment
-            'emotion_class': EMOTION_TO_CLASS[row['Emotion'].strip().lower()], # emotion
+            'sentiment': MELD_SENTIMENT_NAME2ORIG[row['Sentiment'].strip().lower()], # sentiment
+            'emotion_class': MELD_EMOTION_NAME2ORIG[row['Emotion'].strip().lower()], # emotion
             'text': row['Utterance'], # utterance
         }
 
@@ -68,12 +46,12 @@ if __name__ == "__main__":
             token_embeddings, _ = xml_roberta(text)
             token_embeddings = token_embeddings.detach().cpu().numpy().squeeze(0) # (1, T, F) -> (T, F)
 
-            assert token_embeddings.ndim == 2 and token_embeddings.shape[0] != 0 and token_embeddings.shape[1] == 768
+            assert token_embeddings.ndim == 2 and token_embeddings.shape[0] != 0 and token_embeddings.shape[1] == XML_ROBERTA_FEATURE_DIM
 
             samples[subset][sample_id] = {
                 'xml_roberta': token_embeddings, # (T, F) or None
                 'sentiment': sentiment, # ()
-                'emotion_class': emotion_class, # ()
+                'emotion_class': emotion_class, # ()
             }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

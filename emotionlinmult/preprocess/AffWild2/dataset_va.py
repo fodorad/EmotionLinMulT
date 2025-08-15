@@ -1,11 +1,11 @@
 import torch
 import webdataset as wds
 import numpy as np
+import json
 from pathlib import Path
 from tqdm import tqdm
-
-
-DB_PROCESSED = Path("data/db_processed/Aff-Wild2")
+import pprint
+from emotionlinmult.preprocess.AffWild2 import DB_PROCESSED
 
 
 def _process_sample(sample):
@@ -19,6 +19,7 @@ def _process_sample(sample):
     for key in mask_keys:
         sample[key] = torch.from_numpy(sample[key].copy()).bool()
 
+    sample['dataset'] = 'AffWild2_va'
     return sample
 
 
@@ -31,22 +32,43 @@ def get_shard_urls(subset: str):
     return urls
 
 
-def create_dataset(subset: str):
+def create_dataset(subset: str, shuffle_buffer_size: int = 300):
     urls = get_shard_urls(subset)
 
     pipeline = [
-        wds.WebDataset(urls, shardshuffle=False),
+        wds.WebDataset(urls, empty_check=False, shardshuffle=100 if subset == 'train' else False),
         wds.decode(),
         wds.map(_process_sample),
+        wds.shuffle(shuffle_buffer_size if subset == 'train' else False),
     ]
-
-    if subset == "train":
-        pipeline.insert(1, wds.shuffle(5000))
 
     return wds.DataPipeline(*pipeline)
 
 
+def create_dataset_with_size(subset: str, epoch_size: int | None = None):
+    wds_dataset = create_dataset(subset)
+    if epoch_size is None:
+        epoch_size = count_samples()[subset]
+    wds_dataset = wds_dataset.with_epoch(epoch_size).with_length(epoch_size)
+    return wds_dataset
+
+
+def count_samples(cache_path: Path = DB_PROCESSED / "count_samples_va.json", verbose: bool = False) -> dict[str, int]:
+    if cache_path.exists():
+        with open(cache_path, "r") as f:
+            d = json.load(f)
+    else:
+        d = {subset: sum(1 for _ in create_dataset(subset)) for subset in ["train", "valid", "test"]}
+        with open(cache_path, "w") as f:
+            json.dump(d, f)
+    if verbose: pprint.pprint(d)
+    return d
+
+
 if __name__ == "__main__":
+
+    count_samples(verbose=True)
+    exit()
 
     test_dataset = create_dataset("test")
     for i, sample in tqdm(enumerate(test_dataset), desc="Loading test samples"):

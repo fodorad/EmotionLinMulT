@@ -1,0 +1,72 @@
+# experiment
+output_dir: results/SD/stage2
+seed: 42
+
+accelerator: gpu
+devices:
+  - 0
+float32_matmul_precision: medium # high, highest
+
+tasks:
+  valence: # [-1, +1]
+    loss_fn: ccc_mse
+    metrics:
+      - CCC
+      - PCC
+      - ICC
+      - RMSE
+      - SAGR
+  arousal:
+    loss_fn: ccc_mse
+    metrics:
+      - CCC
+      - PCC
+      - ICC
+      - RMSE
+      - SAGR
+
+n_epochs: 75
+warmup_epochs: 5
+
+optimizer:
+  name: adam
+  base_lr: 0.001
+
+awl:
+  lr: 0.01
+
+lr_scheduler:
+  name: CosineAnnealingWarmRestarts
+
+checkpoints:
+  - name: checkpoint_valid_loss
+    monitor: valid_loss
+    mode: min
+  - name: checkpoint_valid_valence_CCC
+    monitor: valid_valence_CCC
+    mode: max
+  - name: checkpoint_valid_arousal_CCC
+    monitor: valid_arousal_CCC
+    mode: max
+  - name: checkpoint_valid_valence_PCC
+    monitor: valid_valence_PCC
+    mode: max
+  - name: checkpoint_valid_arousal_PCC
+    monitor: valid_arousal_PCC
+    mode: max
+  - name: checkpoint_valid_valence_ICC
+    monitor: valid_valence_ICC
+    mode: max
+  - name: checkpoint_valid_arousal_ICC
+    monitor: valid_arousal_ICC
+    mode: max
+  - name: checkpoint_valid_valence_RMSE
+    monitor: valid_valence_RMSE
+    mode: min
+  - name: checkpoint_valid_arousal_RMSE
+    monitor: valid_arousal_RMSE
+    mode: min
+
+checkpoints_auto_index: 1
+
+stage: finetuning

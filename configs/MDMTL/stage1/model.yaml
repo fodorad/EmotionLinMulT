@@ -1,0 +1,101 @@
+model_name: LinMulT
+
+# input-output params
+input_feature_dim:
+  - 768 # wavlm_baseplus
+  - 1024 # clip
+  - 768 # xml_roberta
+
+# input handlers
+#special_handling:
+#  wavlm_baseplus:
+#    type: weighted_sum
+#    start_layer: 6
+#    end_layer: 12
+
+# CM and SA transformer params
+d_model: 40
+n_heads: 8
+n_layers: 6
+attention_type: linear # linear, bigbird, softmax, mha
+n_layers_sa: 3
+
+## bigbird attention params - ignored otherwise
+#block_size: 64
+#num_global_tokens: 16
+#num_random_tokens: 10
+#dropout_attention: 0.
+
+dropout_embedding: 0
+dropout_relu: 0.5
+dropout_residual: 0.5
+dropout_output: 0
+
+# architecture params
+multimodal_signal: True
+n_layers_mms: 3
+time_dim_aligner: aap
+aligned_time_dim: 300
+tam_fusion: True
+
+# task-specific output heads
+heads:
+  - name: emotion_class
+    type: sequence_aggregation
+    norm: bn
+    pooling: gap
+    hidden_dim: 256
+    dropout: 0.5
+    output_dim: 8 # classification
+  - name: emotion_class_fw
+    type: sequence
+    norm: bn
+    pooling: gap
+    hidden_dim: 256
+    dropout: 0.5
+    output_dim: 8 # classification
+  - name: emotion_intensity
+    type: sequence_aggregation
+    norm: bn
+    pooling: gap
+    hidden_dim: 256
+    dropout: 0.5
+    output_dim: 3 # classification
+  - name: sentiment
+    type: sequence_aggregation
+    norm: bn
+    pooling: gap
+    hidden_dim: 256
+    dropout: 0.5
+    output_dim: 1 # regression [-3,+3]
+  #- name: sentiment_class
+  #  type: simple
+  #  pool: gap
+  #  output_dim: 3 # sentiment_class (neutral, positive, negative)
+  - name: valence
+    type: sequence
+    norm: bn
+    pooling: gap
+    hidden_dim: 256
+    dropout: 0.5
+    output_dim: 1 # regression [-1,+1]
+  - name: arousal
+    type: sequence
+    norm: bn
+    pooling: gap
+    hidden_dim: 256
+    dropout: 0.5
+    output_dim: 1 # regression [-1,+1]
+  - name: tmm_wavlm_baseplus
+    type: upsample
+    input_time_dim: 300
+    output_time_dim: 500
+    output_dim: 768 # masked reconstruction (wavlm_baseplus)
+  - name: tmm_clip
+    type: simple
+    output_dim: 1024 # masked reconstruction (clip)
+  - name: tmm_xml_roberta
+    type: downsample
+    input_time_dim: 300
+    output_time_dim: 120
+    output_dim: 768 # masked reconstruction (xml_roberta)

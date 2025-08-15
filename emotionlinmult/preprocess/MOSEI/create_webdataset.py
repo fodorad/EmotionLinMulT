@@ -5,9 +5,11 @@ import numpy as np
 import pandas as pd
 import pickle
 from exordium.utils.padding import pad_or_crop_time_dim
-
-
-DB_PROCESSED = Path("data/db_processed/MOSEI")
+from emotionlinmult.preprocess import (
+    CLIP_TIME_DIM, WAVLM_BASEPLUS_TIME_DIM, XML_ROBERTA_TIME_DIM,
+    CLIP_FEATURE_DIM, WAVLM_BASEPLUS_FEATURE_DIM, XML_ROBERTA_FEATURE_DIM
+)
+from emotionlinmult.preprocess.MOSEI import DB_PROCESSED
 
 
 def get_annotation(csv_path: str, subset: str):
@@ -29,7 +31,7 @@ def get_annotation(csv_path: str, subset: str):
     return annotation
 
 
-def save_webdataset(subset: str, features: list[str], output_dir: Path, analysis_window_sec: int = 10):
+def save_webdataset(subset: str, features: list[str], output_dir: Path):
     annotation_path = DB_PROCESSED / 'mosei_label.csv'
     annotation = get_annotation(DB_PROCESSED / 'mosei_label.csv', subset)
     subset_ids = sorted(list(annotation.keys()))
@@ -40,97 +42,65 @@ def save_webdataset(subset: str, features: list[str], output_dir: Path, analysis
     with open(xml_roberta_path, 'rb') as f:
         xml_roberta_dict = pickle.load(f)
 
-    fps = 30
-    sr = 50
-    clip_time_dim = analysis_window_sec * fps  # 10 sec @ 30 fps
-    wavlm_baseplus_time_dim = analysis_window_sec * sr  # 10 sec @ ~50 sr
-    xml_roberta_time_dim = 120 # from earlier experimentation
-
     with wds.ShardWriter(str(output_dir / f"mosei_{subset}_%06d.tar"), maxcount=1000) as sink:
         for sample_id in tqdm(subset_ids, total=len(subset_ids), desc=f"MOSEI {subset}"):
             sentiment = annotation[sample_id]['sentiment']
-            xml_roberta_full = xml_roberta_dict[sample_id]['xml_roberta'] # (T_3, 768)
+            xml_roberta_full = xml_roberta_dict[sample_id]['xml_roberta']  # (T_text, 768)
 
-            # Load video features
             clip_path = DB_PROCESSED / 'clip' / f'{sample_id}.npy'
-            clip_full = np.load(clip_path) if clip_path.exists() else None  # (T_vid, F)
-
-            # Load audio features
             wavlm_path = DB_PROCESSED / 'wavlm_baseplus' / f'{sample_id}.pkl'
-            if wavlm_path.exists():
-                with open(wavlm_path, 'rb') as f:
-                    wavlm_full = np.array(pickle.load(f))  # (12, T_aud, F)
-                    wavlm_full = np.mean(wavlm_full[8:, :, :], axis=0)  # (T_aud, F)
-            else:
-                wavlm_full = None
 
-            if clip_full is None and wavlm_full is None:
-                raise ValueError(f"No features found for {sample_id}.")
+            if not clip_path.exists() or not wavlm_path.exists():
+                continue               
 
-            vid_frames = clip_full.shape[0]
-            aud_frames = wavlm_full.shape[0]
+            clip_full = np.load(clip_path)  # (T_vid, 1024)
 
-            num_visual_chunks = (vid_frames + clip_time_dim - 1) // clip_time_dim
-            num_acoustic_chunks = (aud_frames + wavlm_baseplus_time_dim - 1) // wavlm_baseplus_time_dim
-            num_chunks = max(1, max(num_visual_chunks, num_acoustic_chunks))
+            with open(wavlm_path, 'rb') as f:
+                wavlm_full = np.array(pickle.load(f))  # (12, T_aud, F)
+                wavlm_full = np.mean(wavlm_full[8:, :, :], axis=0)  # (T_aud, 768)
 
-            for chunk_idx in range(num_chunks):
-                chunk_key = f"{sample_id}_{chunk_idx:03d}"
+            assert clip_full.ndim == 2 and clip_full.shape[1] == CLIP_FEATURE_DIM, \
+                f"Invalid CLIP shape: {clip_full.shape}"
+            assert wavlm_full.ndim == 2 and wavlm_full.shape[1] == WAVLM_BASEPLUS_FEATURE_DIM, \
+                f"Invalid WavLM shape: {wavlm_full.shape}"
+            assert xml_roberta_full.ndim == 2 and xml_roberta_full.shape[1] == XML_ROBERTA_FEATURE_DIM, \
+                f"Invalid XML RoBERTa shape: {xml_roberta_full.shape}"
 
-                # Process video features
-                if clip_full is not None:
-                    start = chunk_idx * clip_time_dim
-                    end = start + clip_time_dim
-                    clip_chunk = clip_full[start:end]
-                    clip, clip_mask = pad_or_crop_time_dim(clip_chunk, clip_time_dim)
-                else:
-                    clip = np.zeros((clip_time_dim, 1024), np.float32)
-                    clip_mask = np.zeros(clip_time_dim, bool)
+            clip, clip_mask = pad_or_crop_time_dim(clip_full, CLIP_TIME_DIM)
+            wavlm, wavlm_mask = pad_or_crop_time_dim(wavlm_full, WAVLM_BASEPLUS_TIME_DIM)
+            xml_roberta, xml_roberta_mask = pad_or_crop_time_dim(xml_roberta_full, XML_ROBERTA_TIME_DIM)
 
-                # Process audio features
-                if wavlm_full is not None:
-                    start = chunk_idx * wavlm_baseplus_time_dim
-                    end = start + wavlm_baseplus_time_dim
-                    wavlm_chunk = wavlm_full[start:end]
-                    wavlm, wavlm_mask = pad_or_crop_time_dim(wavlm_chunk, wavlm_baseplus_time_dim)
-                else:
-                    wavlm = np.zeros((wavlm_baseplus_time_dim, 768), np.float32)
-                    wavlm_mask = np.zeros(wavlm_baseplus_time_dim, bool)
+            assert wavlm.ndim == 2 and wavlm.shape == (WAVLM_BASEPLUS_TIME_DIM, WAVLM_BASEPLUS_FEATURE_DIM), \
+                f"Invalid WavLM shape: {wavlm.shape}"
+            assert clip.ndim == 2 and clip.shape == (CLIP_TIME_DIM, CLIP_FEATURE_DIM), \
+                f"Invalid CLIP shape: {clip.shape}"
+            assert xml_roberta.ndim == 2 and xml_roberta.shape == (XML_ROBERTA_TIME_DIM, XML_ROBERTA_FEATURE_DIM), \
+                f"Invalid XML RoBERTa shape: {xml_roberta.shape}"
 
-                # Process text features
-                xml_roberta, xml_roberta_mask = pad_or_crop_time_dim(xml_roberta_full, xml_roberta_time_dim)
+            # Build feature dictionary
+            feat_dict = {
+                'clip': clip,
+                'clip_mask': clip_mask,
+                'wavlm_baseplus': wavlm,
+                'wavlm_baseplus_mask': wavlm_mask,
+                'xml_roberta': xml_roberta,
+                'xml_roberta_mask': xml_roberta_mask,
+            }
 
-                # Verify feature dimensions
-                assert wavlm.ndim == 2 and wavlm.shape[1] == 768, \
-                    f"Invalid WavLM shape: {wavlm.shape}"
-                assert clip.ndim == 2 and clip.shape[1] == 1024, \
-                    f"Invalid CLIP shape: {clip.shape}"
-                assert xml_roberta.ndim == 2 and xml_roberta.shape[1] == 768, \
-                    f"Invalid XML RoBERTa shape: {xml_roberta.shape}"
+            # Create sample
+            sample = {
+                '__key__': sample_id,
+                'sentiment.npy': np.array(sentiment, np.float32),
+            }
 
-                # Build feature dictionary
-                feat_dict = {
-                    'clip': clip,
-                    'clip_mask': clip_mask,
-                    'wavlm_baseplus': wavlm,
-                    'wavlm_baseplus_mask': wavlm_mask,
-                    'xml_roberta': xml_roberta,
-                    'xml_roberta_mask': xml_roberta_mask,
-                }
+            # Add selected features
+            sample.update({f"{feature}.npy": feat_dict[feature] for feature in features if feature in feat_dict})
+            sample.update({f"{feature}_mask.npy": feat_dict[f"{feature}_mask"] for feature in features if f"{feature}_mask" in feat_dict})
 
-                # Create sample
-                sample = {
-                    '__key__': chunk_key,
-                    'sentiment.npy': np.array(sentiment, np.float32),
-                }
+            sink.write(sample)
 
-                # Add selected features
-                sample.update({f"{feature}.npy": feat_dict[feature] for feature in features if feature in feat_dict})
-                sample.update({f"{feature}_mask.npy": feat_dict[f"{feature}_mask"] for feature in features if f"{feature}_mask" in feat_dict})
-
-                sink.write(sample)
 
 if __name__ == "__main__":
     output_dir = DB_PROCESSED / "webdataset"
     for subset in ['train', 'valid', 'test']:
-        save_webdataset(subset, ['clip', 'wavlm_baseplus', 'xml_roberta'], output_dir)
+        save_webdataset(subset=subset, features=['clip', 'wavlm_baseplus', 'xml_roberta'], output_dir=output_dir)

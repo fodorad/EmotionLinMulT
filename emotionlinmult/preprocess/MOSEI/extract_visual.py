@@ -1,13 +1,9 @@
-import os
 import argparse
 import random
-import time
 from tqdm import tqdm
 from pathlib import Path
 from exordium.video.clip import ClipWrapper
-
-
-DB_PROCESSED = Path('data/db_processed/MOSEI')
+from emotionlinmult.preprocess.MOSEI import DB_PROCESSED
 
 
 if __name__ == "__main__":

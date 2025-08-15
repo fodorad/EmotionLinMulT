@@ -18,14 +18,18 @@ def parse_additional_args(unknown_args):
     for i in range(0, len(unknown_args), 2):
         key = unknown_args[i].lstrip("--") # Remove leading '--'
         value = unknown_args[i + 1]
-        # Try to cast to int or float if possible
-        try:
-            value = int(value)
-        except ValueError:
+
+        if key == "devices":
+            value = [int(v) for v in value.split(",")]
+        else:
+            # Try to cast to int or float if possible
             try:
-                value = float(value)
+                value = int(value)
             except ValueError:
-                pass
+                try:
+                    value = float(value)
+                except ValueError:
+                    pass
         additional_args[key] = value
     return additional_args
 

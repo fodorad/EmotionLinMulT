@@ -1,0 +1,46 @@
+# experiment
+output_dir: results/SD/stage2
+seed: 42
+
+accelerator: gpu
+devices:
+  - 0
+float32_matmul_precision: medium # high, highest
+
+tasks:
+  sentiment: # [-3, +3]
+    loss_fn: mse # bell_l2_l1_loss
+    metrics:
+      - ACC_7
+      - ACC_2
+      - F1_7
+      - F1_2
+      - MAE
+      - CORR
+
+n_epochs: 75
+warmup_epochs: 5
+
+optimizer:
+  name: adam
+  base_lr: 0.001
+
+#awl:
+#  lr: 0.01
+
+lr_scheduler:
+  name: CosineAnnealingWarmRestarts
+
+checkpoints:
+  - name: checkpoint_valid_loss
+    monitor: valid_loss
+    mode: min
+  - name: checkpoint_valid_sentiment_MAE
+    monitor: valid_sentiment_MAE
+    mode: min
+  - name: checkpoint_valid_sentiment_CORR
+    monitor: valid_sentiment_CORR
+    mode: max
+
+stage: finetuning
+# trainer_cp_path: ... # to load trainer and optimizer states as well

@@ -3,8 +3,8 @@ import numpy as np
 from pathlib import Path
 from prettytable import PrettyTable
 from tqdm import tqdm
+from emotionlinmult.preprocess.MOSEI import DB_PROCESSED
 
-DB_PROCESSED = Path("data/db_processed/MOSEI")
 
 xml_roberta_path = DB_PROCESSED / 'xml_roberta' / 'mosei_xml_roberta.pkl'
 with open(xml_roberta_path, 'rb') as f:

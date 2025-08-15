@@ -1,0 +1,138 @@
+# experiment
+output_dir: results/MTL/stage2
+seed: 42
+
+accelerator: gpu
+devices:
+  - 1
+float32_matmul_precision: medium # high, highest
+
+tasks:
+  emotion_class: # 0 neutral, 1 happy, 2 surprise, 3 sad, 4 angry, 5 fear, 6 disgust, 7 contempt
+    weight: 1.0
+    loss_fn: cross_entropy
+    num_classes: 8
+    class_weights:
+      - 0.2628
+      - 0.4423
+      - 0.7700
+      - 0.8110
+      - 0.7412
+      - 2.2914
+      - 1.6812
+      - 0.0001
+    metrics:
+      - F1
+  #emotion_class_fw: # 0 neutral, 1 happy, 2 surprise, 3 sad, 4 angry, 5 fear, 6 disgust, 7 contempt
+  #  weight: 1.0
+  #  loss_fn: cross_entropy
+  #  num_classes: 8
+  #  #class_weights:
+  #  #  - 0.1041
+  #  #  - 0.2053
+  #  #  - 0.5832
+  #  #  - 0.2572
+  #  #  - 1.1721
+  #  #  - 3.7246
+  #  #  - 1.8952
+  #  #  - 0.0583
+  #  metrics:
+  #    - ACC
+  #    - P
+  #    - R
+  #    - F1
+  #emotion_intensity: # 0 weak, 1 normal, 2 strong
+  #  weight: 1.0
+  #  loss_fn: cross_entropy
+  #  num_classes: 3
+  #  metrics:
+  #    - F1
+  #sentiment: # [-3, +3]
+  #  weight: 1.0
+  #  loss_fn: mse # bell_l2_l1_loss
+  #  metrics:
+  #    - ACC_7
+  #    - ACC_2
+  #    - F1_7
+  #    - F1_2
+  #    - MAE
+  #    - CORR
+  #sentiment_class:
+  #  num_classes: 3
+  #  weight: 1.0
+  #  loss_fn: cross_entropy
+  #  metrics:
+  #    - ACC
+  #    - P
+  #    - R
+  #    - F1
+  #valence: # [-1, +1]
+  #  weight: 1.0
+  #  loss_fn: ccc_mse
+  #  metrics:
+  #    - CCC
+  #    - RMSE
+  #    - SAGR
+  #    - PCC
+  #arousal:
+  #  weight: 1.0
+  #  loss_fn: ccc_mse
+  #  metrics:
+  #    - CCC
+  #    - RMSE
+  #    - SAGR
+  #    - PCC
+
+#consistency_rules:
+#  - name: ...
+#    weight: 0.1
+
+n_epochs: 100
+warmup_epochs: 5
+
+optimizer:
+  name: adamw # adams
+  base_lr: 0.001
+  decoupled_weight_decay: True
+  weight_decay: 0.0005
+
+
+#awl:
+#  lr: 0.01
+
+lr_scheduler:
+  name: CosineAnnealingWarmRestarts #CosineAnnealingLR
+
+#early_stopping:
+#  monitor: valid_loss
+#  patience: 30
+#  mode: min
+
+checkpoints:
+  - name: checkpoint_valid_loss
+    monitor: valid_loss
+    mode: min
+  - name: checkpoint_valid_emotion_class_F1
+    monitor: valid_emotion_class_F1
+    mode: max
+  #- name: checkpoint_valid_emotion_class_fw_F1
+  #  monitor: valid_emotion_class_fw_F1
+  #  mode: max
+  #- name: checkpoint_valid_emotion_intensity_F1
+  #  monitor: valid_emotion_intensity_F1
+  #  mode: max
+  #- name: checkpoint_valid_sentiment_MAE
+  #  monitor: valid_sentiment_MAE
+  #  mode: min
+  #- name: checkpoint_valid_sentiment_class_F1
+  #  monitor: valid_sentiment_class_F1
+  #  mode: max
+  #- name: checkpoint_valid_valence_CCC
+  #  monitor: valid_valence_CCC
+  #  mode: max
+  #- name: checkpoint_valid_arousal_CCC
+  #  monitor: valid_arousal_CCC
+  #  mode: max
+
+stage: finetuning
+# trainer_cp_path: ... # to load trainer and optimizer states as well

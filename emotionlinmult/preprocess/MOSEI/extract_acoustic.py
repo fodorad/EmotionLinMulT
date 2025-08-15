@@ -1,14 +1,10 @@
-import os
 import argparse
 import random
-import time
 from tqdm import tqdm
 from pathlib import Path
 from exordium.audio.io import video2audio
 from exordium.audio.wavlm import WavlmWrapper
-
-
-DB_PROCESSED = Path('data/db_processed/MOSEI')
+from emotionlinmult.preprocess.MOSEI import DB_PROCESSED
 
 
 def convert(video_path: Path):

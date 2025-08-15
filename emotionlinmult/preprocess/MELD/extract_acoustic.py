@@ -6,15 +6,7 @@ from tqdm import tqdm
 from pathlib import Path
 from exordium.audio.io import video2audio
 from exordium.audio.wavlm import WavlmWrapper
-
-
-DB = Path('data/db/MELD')
-DB_PROCESSED = Path('data/db_processed/MELD')
-SUBSET_NAME = {
-    'train_splits': 'train',
-    'dev_splits_complete': 'valid',
-    'output_repeated_splits_test': 'test'
-}
+from emotionlinmult.preprocess.MELD import DB, DB_PROCESSED, SUBSET_NAME
 
 
 def convert(video_path: Path):

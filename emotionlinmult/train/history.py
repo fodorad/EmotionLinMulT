@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import time
 import torch
 import numpy as np
 import matplotlib
@@ -14,6 +15,9 @@ class History:
         self.history = {}
         self.log_dir = Path(log_dir)
         self.plot_dir = self.log_dir / 'visualization'
+        self._start_time = time.time()
+        self.epoch_times = []
+        self.total_training_time = 0.0
 
 
     def save(self):
@@ -31,6 +35,22 @@ class History:
         with open(output_path, "w") as f:
             json.dump(history_test, f, indent=4, default=self._convert_to_serializable)
         print(f"\nHistory saved to {output_path}")
+
+
+    def record_epoch_time(self):
+        """Record the time taken for the current epoch and update total training time."""
+        epoch_time = time.time() - self._start_time
+        self.epoch_times.append(epoch_time)
+        self.total_training_time += epoch_time
+        # Reset the start time for the next epoch
+        self._start_time = time.time()
+        print(f"Epoch time: {epoch_time:.2f} seconds | {epoch_time/3600:.2f} hours")
+        print(f"Total training time: {self.total_training_time:.2f} seconds | {self.total_training_time/3600:.2f} hours")
+        if 'info' not in self.history:
+            self.history['info'] = {}
+        self.history['info']['epoch_times'] = self.epoch_times
+        self.history['info']['total_training_time'] = self.total_training_time
+        return epoch_time
 
 
     def _convert_to_serializable(self, obj):
@@ -88,9 +108,11 @@ class History:
         return epochs[best_idx], values[best_idx]
 
 
-    def plot(self, task: str,
-                   metric: str,
-                   best_epoch_metric: str = None):
+    def plot(self, 
+            task: str,
+            metric: str,
+            best_epoch_metric: str = None
+        ):
         """
         Plot a given metric for both training and validation phases, and optionally mark
         the best epoch of another metric.
@@ -104,7 +126,7 @@ class History:
         """
 
         # Determine whether to maximize or minimize based on the metric name
-        mode = 'max' if any([elem.lower() in metric.lower() for elem in ['f1', 'corr', 'acc']]) else 'min'
+        mode = 'max' if any([elem.lower() in metric.lower() for elem in ['f1', 'corr', 'acc', 'ccc', 'pcc', 'icc', 'sagr', 'combined']]) else 'min'
 
         # Plot training and validation metrics
         for phase in ["train", "valid"]:
@@ -142,7 +164,7 @@ class History:
         plt.grid(True)
         plt.tight_layout()
 
-        output_file = self.plot_dir / f'plot_{metric}.png'
+        output_file = self.plot_dir / f'plot_{task}_{metric}.png'
         output_file.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(output_file)
         plt.close()

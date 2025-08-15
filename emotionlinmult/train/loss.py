@@ -1,15 +1,45 @@
 import torch
 import torch.nn.functional as F
 from typing import Any
-from exordium.utils.loss import bell_l2_l1_loss
+from exordium.utils.loss import bell_l2_l1_loss, FocalLoss
+import torch
+import torch.nn as nn
+
+
+class AutomaticWeightedLoss(nn.Module):
+    """automatically weighted multi-task loss
+
+    source: https://github.com/Mikoto10032/AutomaticWeightedLoss
+
+    Params:
+        num: int, the number of loss
+        x: multi-task loss
+    Examples:
+        loss1=1
+        loss2=2
+        awl = AutomaticWeightedLoss(2)
+        loss_sum = awl(loss1, loss2)
+    """
+    def __init__(self, num=2):
+        super(AutomaticWeightedLoss, self).__init__()
+        params = torch.ones(num, requires_grad=True)
+        self.params = torch.nn.Parameter(params)
+
+    def forward(self, x: list[torch.Tensor]):
+        loss_sum = 0
+        for i, loss in enumerate(x):
+            loss_sum += 0.5 / (self.params[i] ** 2) * loss + torch.log(1 + self.params[i] ** 2)
+        return loss_sum
 
 
 def compute_sentiment_class_loss(
         y_pred: torch.Tensor,
         y_true: torch.Tensor,
         mask: torch.BoolTensor,
+        loss_fn: str,
         num_classes: int = 3,
-        weight: float = 1.0
+        weight: float = 1.0,
+        class_weights: torch.Tensor | list[float] | None = None
     ) -> torch.Tensor:
     """Compute sentiment classification loss."""
     if not mask.any():
@@ -17,7 +47,16 @@ def compute_sentiment_class_loss(
 
     y_pred = y_pred[mask]
     y_true = y_true[mask]
-    return weight * F.cross_entropy(y_pred, y_true)
+
+    if isinstance(class_weights, list):
+        class_weights = torch.tensor(class_weights, device=y_pred.device)
+
+    if loss_fn == "cross_entropy":
+        return weight * F.cross_entropy(y_pred, y_true, weight=class_weights)
+    elif loss_fn == "focal":
+        return weight * FocalLoss(gamma=2, alpha=class_weights, task_type='multi-class', num_classes=num_classes)(y_pred, y_true)
+    else:
+        raise ValueError(f"Unknown loss function: {loss_fn}")
 
 
 def compute_sentiment_loss(
@@ -32,7 +71,15 @@ def compute_sentiment_loss(
 
     y_pred = y_pred[mask]
     y_true = y_true[mask]
-    return weight * bell_l2_l1_loss(y_pred, y_true)
+    #return weight * torch.nn.functional.l1_loss(y_pred, y_true)
+    #return weight * bell_l2_l1_loss(y_pred, y_true)
+
+    if y_pred.ndim == 2 and y_pred.shape[1] == 1:
+        y_pred = y_pred.view(-1)
+    if y_true.ndim == 2 and y_true.shape[1] == 1:
+        y_true = y_true.view(-1)
+    
+    return weight * torch.nn.functional.mse_loss(y_pred, y_true)
 
 
 def compute_sentiment_consistency_loss(
@@ -62,13 +109,15 @@ def compute_sentiment_consistency_loss(
     return weight * consistency_loss
 
 
-def compute_emotion_loss(
+def compute_emotion_class_loss(
         y_pred: torch.Tensor,
         y_true: torch.Tensor,
         mask: torch.BoolTensor,
-        num_classes: int,
+        loss_fn: str,
+        num_classes: int = 8,
         weight: float = 1.0,
-        is_framewise: bool = False
+        is_framewise: bool = False,
+        class_weights: torch.Tensor | list[float] | None = None
     ) -> torch.Tensor:
     """Compute emotion classification loss."""
     if not mask.any():
@@ -82,54 +131,97 @@ def compute_emotion_loss(
         y_pred = y_pred[mask]
         y_true = y_true[mask]
 
-    return weight * F.cross_entropy(y_pred, y_true)
+    if isinstance(class_weights, list):
+        class_weights = torch.tensor(class_weights, device=y_pred.device)
+
+    if loss_fn == "cross_entropy":
+        return weight * F.cross_entropy(y_pred, y_true, weight=class_weights)
+    elif loss_fn == "focal":
+        return weight * FocalLoss(gamma=2, alpha=class_weights, task_type='multi-class', num_classes=num_classes)(y_pred, y_true)
+    else:
+        raise ValueError(f"Unknown loss function: {loss_fn}")
 
 
-def compute_intensity_loss(
+def compute_emotion_intensity_loss(
         y_pred: torch.Tensor,
         y_true: torch.Tensor,
         mask: torch.BoolTensor,
-        num_classes: int,
+        loss_fn: str,
+        num_classes: int = 3,
         weight: float = 1.0,
-        is_framewise: bool = False
+        class_weights: torch.Tensor | list[float] | None = None
     ) -> torch.Tensor:
     """Compute emotion intensity classification loss."""
     if not mask.any():
         return torch.zeros(size=(), device=y_pred.device)
-        
+
     y_pred = y_pred[mask]
     y_true = y_true[mask]
-    return weight * F.cross_entropy(y_pred, y_true)
+
+    if isinstance(class_weights, list):
+        class_weights = torch.tensor(class_weights, device=y_pred.device)
+
+    if loss_fn == "cross_entropy":
+        return weight * F.cross_entropy(y_pred, y_true, weight=class_weights)
+    elif loss_fn == "focal":
+        return weight * FocalLoss(gamma=2, alpha=class_weights, task_type='multi-class', num_classes=num_classes)(y_pred, y_true)
+    else:
+        raise ValueError(f"Unknown loss function: {loss_fn}")
 
 
-def compute_valence_loss(
-        y_pred_v: torch.Tensor,
-        y_true_v: torch.Tensor,
-        mask_v: torch.BoolTensor,
-        weight: float = 1.0
-    ) -> torch.Tensor:
-    """Compute valence regression loss."""
-    loss = torch.zeros(size=(), device=y_pred_v.device)
+def va_loss(
+    y_pred: torch.Tensor, 
+    y_true: torch.Tensor,
+    mask: torch.BoolTensor,
+    weight: float = 1.0,
+    loss_type: str = "ccc"
+) -> torch.Tensor:
+    """
+    PyTorch loss functions for VA tasks.
+    
+    Args:
+        preds: Predictions tensor (N, T, 1)
+        targets: Targets tensor (N, T, 1)
+        mask: Boolean mask for valid frames (N, T)
+        loss_type: One of ['ccc', 'mse', 'ccc_mse']
+    
+    Returns:
+        torch.Tensor: Loss value
+    """
+    if not mask.any():
+        return torch.zeros(size=(), device=y_pred.device)
 
-    if mask_v.any():
-        loss += bell_l2_l1_loss(y_pred_v[mask_v], y_true_v[mask_v])
+    y_pred = y_pred[mask]
+    y_true = y_true[mask]
 
-    return weight * loss
+    if loss_type == "ccc":
+        return weight * (1 - ccc_loss(y_pred, y_true))
+    elif loss_type == "mse":
+        return weight * torch.nn.functional.mse_loss(y_pred, y_true)
+    elif loss_type == "ccc_mse":
+        return weight * (0.5*(1 - ccc_loss(y_pred, y_true)) + \
+               0.5*torch.nn.functional.mse_loss(y_pred.view(-1), y_true))
+    else:
+        raise ValueError(f"Unknown loss type: {loss_type}")
 
 
-def compute_arousal_loss(
-        y_pred_a: torch.Tensor,
-        y_true_a: torch.Tensor,
-        mask_a: torch.BoolTensor,
-        weight: float = 1.0
-    ) -> torch.Tensor:
-    """Compute arousal regression loss."""
-    loss = torch.zeros(size=(), device=y_pred_a.device)
-
-    if mask_a.any():
-        loss += bell_l2_l1_loss(y_pred_a[mask_a], y_true_a[mask_a])
-
-    return weight * loss
+def ccc_loss(
+    y_pred: torch.Tensor, 
+    y_true: torch.Tensor,
+) -> torch.Tensor:
+    """Concordance Correlation Coefficient Loss"""
+    y_pred = y_pred.view(-1)
+    y_true = y_true.view(-1)
+    
+    mean_pred = torch.mean(y_pred)
+    mean_target = torch.mean(y_true)
+    
+    cov = torch.mean((y_pred - mean_pred) * (y_true - mean_target))
+    var_pred = torch.var(y_pred, unbiased=False)
+    var_target = torch.var(y_true, unbiased=False)
+    
+    ccc = (2 * cov) / (var_pred + var_target + (mean_pred - mean_target)**2 + 1e-8)
+    return ccc
 
 
 def consistency_loss(
@@ -148,11 +240,27 @@ def consistency_loss(
     return total_loss
 
 
+def reconstruction_loss(
+        y_pred: torch.Tensor,
+        y_true: torch.Tensor,
+        mask: torch.BoolTensor,
+        weight: float = 1.0
+    ) -> torch.Tensor:
+    """Compute reconstruction loss."""
+    if not mask.any():
+        return torch.zeros(size=(), device=y_pred.device)
+
+    y_pred = y_pred[mask]
+    y_true = y_true[mask]
+    return weight * torch.nn.functional.mse_loss(y_pred, y_true)
+
+
 def multitarget_loss(
-        y_preds: list[torch.Tensor],
+        y_preds: dict[str, torch.Tensor],
         y_targets: list[torch.Tensor],
         target_masks: list[torch.BoolTensor], 
-        tasks: dict[str, dict[str, Any]]
+        tasks: dict[str, dict[str, Any]],
+        awl: AutomaticWeightedLoss | None = None
     ) -> torch.Tensor:
     """Compute multitarget loss with masking.
 
@@ -170,93 +278,149 @@ def multitarget_loss(
             - is_framewise: bool (for emotion classification)
             - weight: float (loss weight)
             - consistency_weight: float (for sentiment task)
+        awl (AutomaticWeightedLoss | None): Automatic weighted loss nn.Module
 
     Returns:
         torch.Tensor: Total weighted loss (scalar).
     """
-    total_loss = torch.zeros(size=(), device=y_preds[0].device)
+    total_loss = [] # torch.zeros(size=(), device=y_targets[0].device)
 
     for task_ind, (task_name, task_info) in enumerate(tasks.items()):
 
-        if task_name == 'sentiment_class':
-            y_pred = y_preds[task_ind]
+        if task_name == 'emotion_class':
+            y_pred = y_preds[task_name]
             y_target = y_targets[task_ind]
             mask = target_masks[task_ind]
-            total_loss += compute_sentiment_class_loss(
-                y_pred, y_target, mask,
-                task_info['num_classes'],
-                task_info['weight']
-            )
+            total_loss.append(compute_emotion_class_loss(
+                y_pred=y_pred, 
+                y_true=y_target, 
+                mask=mask, 
+                loss_fn=task_info['loss_fn'],
+                num_classes=task_info['num_classes'],
+                weight=task_info.get('weight', 1.0), 
+                is_framewise=False, 
+                class_weights=task_info.get('class_weights', None)
+            ))
+        
+        elif task_name == 'emotion_class_fw':
+            y_pred = y_preds[task_name]
+            y_target = y_targets[task_ind]
+            mask = target_masks[task_ind]
+            total_loss.append(compute_emotion_class_loss(
+                y_pred=y_pred, 
+                y_true=y_target, 
+                mask=mask, 
+                loss_fn=task_info['loss_fn'],
+                num_classes=task_info['num_classes'],
+                weight=task_info.get('weight', 1.0), 
+                is_framewise=True,
+                class_weights=task_info.get('class_weights', None)
+            ))
+
+        elif task_name == 'emotion_intensity':
+            y_pred = y_preds[task_name]
+            y_target = y_targets[task_ind]
+            mask = target_masks[task_ind]
+            total_loss.append(compute_emotion_intensity_loss(
+                y_pred=y_pred, 
+                y_true=y_target, 
+                mask=mask, 
+                loss_fn=task_info['loss_fn'],
+                num_classes=task_info['num_classes'],
+                weight=task_info.get('weight', 1.0)
+            ))
 
         elif task_name == 'sentiment':
-            y_pred = y_preds[task_ind]
+            y_pred = y_preds[task_name]
             y_target = y_targets[task_ind]
             mask = target_masks[task_ind]
-            total_loss += compute_sentiment_loss(
-                y_pred, y_target, mask,
-                task_info['weight']
-            )
+            total_loss.append(compute_sentiment_loss(
+                y_pred=y_pred, 
+                y_true=y_target, 
+                mask=mask,
+                weight=task_info.get('weight', 1.0)
+            ))
 
-        elif task_name == 'emotion':
-            y_pred = y_preds[task_ind]
+        elif task_name == 'sentiment_class':
+            y_pred = y_preds[task_name]
             y_target = y_targets[task_ind]
             mask = target_masks[task_ind]
-            total_loss += compute_emotion_loss(
-                y_pred, y_target, mask, task_info['num_classes'],
-                task_info['weight'], is_framewise=task_info.get('is_framewise', False)
-            )
-
-        elif task_name == 'intensity':
-            y_pred = y_preds[task_ind]
-            y_target = y_targets[task_ind]
-            mask = target_masks[task_ind]
-            total_loss += compute_intensity_loss(
-                y_pred, y_target, mask,
-                task_info['num_classes'],
-                task_info['weight']
-            )
+            total_loss.append(compute_sentiment_class_loss(
+                y_pred=y_pred, 
+                y_true=y_target, 
+                mask=mask, 
+                loss_fn=task_info['loss_fn'],
+                num_classes=task_info['num_classes'],
+                weight=task_info.get('weight', 1.0)
+            ))
 
         elif task_name == 'valence':
-            y_pred = y_preds[task_ind]
+            y_pred = y_preds[task_name]
             y_target = y_targets[task_ind]
             mask = target_masks[task_ind]
-            total_loss += compute_valence_loss(
-                y_pred, y_target, mask,
-                task_info['weight']
-            )
+            total_loss.append(va_loss(
+                y_pred=y_pred, 
+                y_true=y_target, 
+                mask=mask,
+                weight=task_info.get('weight', 1.0),
+                loss_type="ccc"
+            ))
 
         elif task_name == 'arousal':
-            y_pred = y_preds[task_ind]
+            y_pred = y_preds[task_name]
             y_target = y_targets[task_ind]
             mask = target_masks[task_ind]
-            total_loss += compute_arousal_loss(
-                y_pred, y_target, mask,
-                task_info['weight']
-            )
+            total_loss.append(va_loss(
+                y_pred=y_pred, 
+                y_true=y_target, 
+                mask=mask,
+                weight=task_info.get('weight', 1.0),
+                loss_type="ccc"
+            ))
+
+        elif task_name in ['tmm_wavlm_baseplus', 'tmm_clip', 'tmm_xml_roberta']:
+            y_pred = y_preds[task_name]
+            y_target = y_targets[task_ind]
+            mask = target_masks[task_ind]
+            total_loss.append(reconstruction_loss(
+                y_pred=y_pred, 
+                y_true=y_target, 
+                mask=mask,
+                weight=task_info.get('weight', 1.0)
+            ))
+
+    if awl is not None:
+        total_loss = awl(total_loss)
+    else:
+        total_loss = sum(total_loss)
 
     return total_loss
 
 
 if __name__ == '__main__':
-    
-    sentiment_class_pred = torch.randn(16, 3)
-    sentiment_class_target = torch.randint(0, 3, (16,))
-    sentiment_class_mask = torch.randint(0, 2, (16,)).bool()
-    
-    sentiment_pred = torch.randn(16)
-    sentiment_target = torch.randn(16)
-    sentiment_mask = torch.randint(0, 2, (16,)).bool()
-    
+
+    awl = AutomaticWeightedLoss(2)
+    print('awl parameters:', awl.parameters())
+
+    sentiment_class_pred = torch.randn(16, 3).to(device='cuda:0')
+    sentiment_class_target = torch.randint(0, 3, (16,)).to(device='cuda:0')
+    sentiment_class_mask = torch.randint(0, 2, (16,)).bool().to(device='cuda:0')
+
     sentiment_class_loss = compute_sentiment_class_loss(
-        sentiment_class_pred, sentiment_class_target, sentiment_class_mask, 3, 1.0
-    )
-    sentiment_loss = compute_sentiment_loss(
-        sentiment_pred, sentiment_target, sentiment_mask, 1.0
-    )
-    sentiment_consistency_loss = compute_sentiment_consistency_loss(
-        sentiment_class_pred, sentiment_pred, sentiment_mask, 1.0
+        sentiment_class_pred, 
+        sentiment_class_target, 
+        sentiment_class_mask, 
+        loss_fn="cross_entropy",
+        num_classes=3,
+        weight=1.0
     )
 
-    print(sentiment_class_loss.item())
-    print(sentiment_loss.item())
-    print(sentiment_consistency_loss.item())
+    sentiment_class_loss = compute_sentiment_class_loss(
+        sentiment_class_pred, 
+        sentiment_class_target, 
+        sentiment_class_mask, 
+        loss_fn="focal",
+        num_classes=3,
+        weight=1.0,
+        class_weights=torch.tensor([0.1, 0.2, 0.7])
+    )
